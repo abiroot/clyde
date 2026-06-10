@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+/* ---- Clyde design tokens ------------------------------------------------ */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  /* Warm near-black canvas (nods to Claude's clay/dark aesthetic). */
+  --color-canvas: #0b0b0d;
+  --color-surface: #141417;
+  --color-surface-2: #1c1c21;
+  --color-border: #26262c;
+  --color-border-soft: #1f1f24;
+
+  --color-ink: #f4f4f5;
+  --color-ink-soft: #a1a1aa;
+  --color-ink-faint: #6b6b74;
+
+  /* Claude clay accent. */
+  --color-clay: #d97757;
+  --color-clay-soft: #e8a98f;
+  --color-clay-dim: #7a4534;
+
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+  --color-danger: #f87171;
+
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  /* Subtle ambient glow behind the app. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(60% 50% at 50% -10%, rgba(217, 119, 87, 0.12), transparent 70%),
+      radial-gradient(40% 30% at 100% 100%, rgba(217, 119, 87, 0.05), transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  input,
+  textarea {
+    user-select: text;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-surface-2);
+  }
+}
+
+@layer utilities {
+  .drag {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-soft);
+    border-radius: var(--radius-2xl);
+  }
+  .fade-in {
+    animation: fade-in 0.25s ease both;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
