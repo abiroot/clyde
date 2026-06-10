@@ -2,10 +2,14 @@
 
 # Clyde
 
-**Account switcher & auto-failover for Claude Code.**
+**Account switcher for Claude Code.**
 
-Run plain `claude` across all your Claude accounts — Clyde switches between them
-automatically, *before* you ever hit a usage limit.
+Run plain `claude` across all your Claude accounts — Clyde switches the active one
+in a click, so you can move off an account *before* you hit a usage limit.
+
+[![CI](https://github.com/Abiroot/clyde/actions/workflows/ci.yml/badge.svg)](https://github.com/Abiroot/clyde/actions/workflows/ci.yml)
+&nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+&nbsp;![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
 
 </div>
 
@@ -22,35 +26,41 @@ Clyde fixes both:
 
 - **One `claude`, one set of settings.** You keep using the default `~/.claude`
   config. Clyde never asks you to juggle config directories.
-- **Switching happens underneath, mid-session.** A tiny local proxy injects the
-  right account's credentials per request, so you never restart.
-- **It pre-empts limits.** Clyde reads each account's live utilization and routes
-  to the freshest one *before* a hard limit lands — and fails over instantly if
-  one does.
+- **Switching is one click — no proxy, no restart of Clyde.** Clyde writes the
+  chosen account straight into Claude Code's own credential store; plain `claude`
+  then runs as that account, whether or not Clyde is open.
+- **It shows you the headroom.** Clyde reads each account's live utilization so you
+  can switch to the freshest one *before* a hard limit lands.
 
 ## How it works
 
-Claude Code lets you point it at a custom endpoint with `ANTHROPIC_BASE_URL`.
-Clyde runs a small proxy on `localhost` and wires Claude Code to it with two keys
-in `~/.claude/settings.json`. For every request the proxy:
+Claude Code reads its subscription token from one place — the OS keychain item for
+its config dir (`Claude Code-credentials` for the default `~/.claude`) — plus the
+displayed identity in `~/.claude/.claude.json`. To make `claude` run as a different
+account, Clyde rewrites those two things, in place, with the chosen account's OAuth:
 
-1. picks the active account (balancing on live usage, honoring a pin),
-2. mints a fresh `Authorization: Bearer` + `anthropic-beta: oauth-…`,
-3. forwards to `api.anthropic.com`, streaming the response straight back,
-4. reads the `anthropic-ratelimit-unified-*` headers to update each account's gauges,
-5. on a `429` / hard limit, transparently retries on the next account.
+1. it keeps each account's OAuth (refresh token) in your OS Keychain,
+2. on switch, it refreshes that account's token if needed and writes it into Claude
+   Code's `Claude Code-credentials` keychain entry, updating `.claude.json`'s
+   identity to match,
+3. plain `claude` then talks straight to `api.anthropic.com` as that account,
+4. in the background Clyde reads each account's `GET /api/oauth/usage` — the same
+   endpoint Claude Code's own status line uses — to keep the 5h / 7d gauges current
+   (no messages are sent, so it costs no quota).
 
 ```
-   claude ──HTTP──▶ 127.0.0.1:8787 (Clyde) ──HTTPS──▶ api.anthropic.com
-                         │
-                         ├─ tokens in your OS Keychain, refreshed per account
-                         ├─ live 5h / 7d utilization per account
-                         └─ pre-emptive routing + 429 failover
+   you ──click──▶ Clyde ──writes──▶ Claude Code keychain + .claude.json
+                    │
+                    ├─ each account's OAuth in your OS Keychain, refreshed
+                    └─ live 5h / 7d utilization per account (GET /api/oauth/usage)
+
+   claude ──HTTPS──▶ api.anthropic.com   (directly, as the chosen account)
 ```
 
-Because the proxy supplies the real OAuth headers itself, the credential Claude
-Code sends is irrelevant — which is exactly what lets a single config dir drive
-any number of accounts.
+Because Clyde supplies the real credential to Claude Code's own store, a single
+config dir can drive any number of accounts. Note: Claude Code caches its token in
+memory at startup, so a switch takes effect on the **next `claude` run** rather than
+instantly mid-session.
 
 > Full design notes in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -64,7 +74,7 @@ any number of accounts.
 Requires [Rust](https://rustup.rs) and [Node 20+](https://nodejs.org).
 
 ```bash
-git clone https://github.com/your-org/clyde
+git clone https://github.com/Abiroot/clyde
 cd clyde
 npm install
 npm run tauri dev      # run in dev
@@ -73,20 +83,27 @@ npm run tauri build    # produce a .app / installer
 
 ## Usage
 
-1. **Add your accounts** — sign in through the browser, or paste an existing
-   token. Tokens are stored in your OS Keychain, never in plaintext.
-2. **Connect Claude Code** — one click wires `~/.claude/settings.json` to the
-   proxy. (One click to disconnect restores it exactly.)
-3. **Use `claude` as normal.** Watch the gauges; Clyde handles the rest. Pin a
-   specific account any time, or leave it on Auto.
+1. **Add your accounts** — four ways, whichever fits:
+   - **Detected** — import logins Claude Code already has on this machine (no
+     re-auth; reuses their tokens).
+   - **Browser** — sign in to any account in your browser and paste the code back.
+   - **Terminal** — let Claude Code's own `/login` run in an isolated profile.
+   - **Token** — paste an existing OAuth token JSON.
+
+   Tokens are stored in your OS Keychain, never in plaintext.
+2. **Pick the active account** — one click makes it the account Claude Code uses.
+   Clyde writes it into Claude Code's own credential store; nothing else to wire up.
+3. **Use `claude` as normal.** Watch the gauges and switch whenever an account is
+   running hot. (A switch applies to your next `claude` run.)
 
 ## Security
 
 - Credentials live only in the OS-native secret store (macOS Keychain / Windows
   Credential Manager / Linux Secret Service) via the `keyring` crate.
-- The proxy binds to `127.0.0.1` only.
-- Clyde talks to nothing but `api.anthropic.com` (the upstream) — there is no
-  telemetry and no Clyde server.
+- Clyde's only outbound calls are to Anthropic: `api.anthropic.com` (usage +
+  profile) and `platform.claude.com` (OAuth token exchange / refresh). Browser
+  sign-in opens `claude.com` in *your* browser, not from Clyde. There is no
+  telemetry, no Clyde server, and no listening socket.
 
 See [`SECURITY.md`](SECURITY.md) to report issues.
 

@@ -1,11 +1,11 @@
 [package]
 name = "clyde"
 version = "0.1.0"
-description = "Account switcher & auto-failover for Claude Code"
+description = "Multi-account switcher for Claude Code"
 authors = ["Clyde contributors"]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/your-org/clyde"
+repository = "https://github.com/Abiroot/clyde"
 
 [lib]
 # The `_lib` suffix keeps the lib name unique from the bin name (Windows quirk).
@@ -27,17 +27,12 @@ tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# --- Async runtime + HTTP proxy core ---
+# --- Async runtime + HTTP client ---
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["http2"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
-    "stream",
     "rustls-tls",
 ] }
-futures-util = "0.3"
-http = "1"
-bytes = "1"
 
 # --- Secure storage (macOS Keychain / Windows Credential Manager / Linux Secret Service) ---
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
@@ -46,12 +41,10 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
-url = "2"
 
 # --- Time, errors, logging ---
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
-thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

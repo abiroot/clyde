@@ -1,4 +1,4 @@
-//! Core domain types shared across the proxy, vault, and Tauri commands.
+//! Core domain types shared across the engine, vault, and Tauri commands.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,26 @@ pub struct Account {
     #[serde(default)]
     pub subscription_type: Option<String>,
     pub credential: Credential,
+    /// Raw `subscriptionType` (e.g. `"max"`, `"pro"`) from Claude Code's
+    /// credential blob, captured at import so [`crate::claude_sync::activate`] can
+    /// write *this* account's plan back — not the outgoing account's.
+    #[serde(default)]
+    pub subscription_raw: Option<String>,
+    /// Raw `rateLimitTier` (e.g. `"default_claude_max_20x"`) from the credential
+    /// blob, written back on activation for the same reason.
+    #[serde(default)]
+    pub rate_limit_tier: Option<String>,
+    /// The `oauthAccount` object Claude Code keeps in `.claude.json`, captured at
+    /// import time (when available) so Clyde can restore the right identity when
+    /// it makes this account active. Synthesized as `{ "emailAddress": … }` for
+    /// accounts added via OAuth login or token paste.
+    #[serde(default)]
+    pub oauth_account: Option<serde_json::Value>,
+    /// The Claude Code config dir this account was imported from, if any. Claude
+    /// Code keeps that dir's keychain token fresh, so Clyde re-reads it at switch
+    /// time to recover from a stale stored snapshot.
+    #[serde(default)]
+    pub source_config_dir: Option<String>,
 }
 
 /// OAuth credential for a single account.
@@ -36,8 +56,8 @@ impl Credential {
     }
 }
 
-/// Live rate-limit picture for an account, parsed from Anthropic's
-/// `anthropic-ratelimit-unified-*` response headers.
+/// Live usage picture for an account, parsed from Anthropic's
+/// `GET /api/oauth/usage` endpoint (the same one Claude Code's status line uses).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     /// 0..=100 utilization of the rolling 5-hour window.
@@ -50,31 +70,6 @@ pub struct UsageSnapshot {
     pub resets_at: Option<i64>,
     /// Unix epoch milliseconds of the last update.
     pub updated_at: i64,
-}
-
-impl UsageSnapshot {
-    /// The worst (highest) utilization across tracked windows, used for routing.
-    pub fn pressure(&self) -> f64 {
-        let a = self.five_hour_utilization.unwrap_or(0.0);
-        let b = self.seven_day_utilization.unwrap_or(0.0);
-        a.max(b)
-    }
-
-    /// True if this account has been rejected (hard limited) right now.
-    pub fn is_limited(&self) -> bool {
-        matches!(self.status.as_deref(), Some("rejected"))
-    }
-}
-
-/// How Clyde decides which account a request goes to.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "accountId", rename_all = "snake_case")]
-pub enum Mode {
-    /// Balance + fail over automatically across all enabled accounts.
-    #[default]
-    Auto,
-    /// Always use this account; never fail over.
-    Pinned(String),
 }
 
 /// Secret-free projection of an account for the UI.
@@ -93,12 +88,10 @@ pub struct AccountView {
 #[derive(Clone, Debug, Serialize)]
 pub struct AppSnapshot {
     pub accounts: Vec<AccountView>,
-    pub mode: Mode,
+    /// The account Clyde has made active in Claude Code's credential store.
     pub active_id: Option<String>,
-    pub proxy_port: u16,
-    pub proxy_running: bool,
-    /// Whether `~/.claude/settings.json` is currently wired to route through Clyde.
-    pub integration_enabled: bool,
+    /// Email of the active account, for the title bar.
+    pub active_email: Option<String>,
 }
 
 pub fn now_ms() -> i64 {

@@ -1,12 +1,12 @@
-//! Clyde — account switcher & auto-failover for Claude Code.
+//! Clyde — multi-account switcher for Claude Code.
 
-mod claude_config;
+mod claude_sync;
 mod commands;
 mod engine;
+mod import_claude;
 mod model;
 mod oauth;
-mod proxy;
-mod ratelimit;
+mod usage;
 mod vault;
 
 use engine::Core;
@@ -15,13 +15,6 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Manager, WindowEvent};
 
 use commands::PendingLogins;
-
-fn proxy_port() -> u16 {
-    std::env::var("CLYDE_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8787)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -32,8 +25,7 @@ pub fn run() {
         )
         .try_init();
 
-    let port = proxy_port();
-    let core = Core::new(port).expect("failed to initialize Clyde engine");
+    let core = Core::new().expect("failed to initialize Clyde engine");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -52,24 +44,34 @@ pub fn run() {
         .manage(PendingLogins::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
-            commands::set_mode,
+            commands::set_active_account,
             commands::rename_account,
             commands::remove_account,
             commands::begin_login,
             commands::complete_login,
             commands::import_token,
-            commands::enable_integration,
-            commands::disable_integration,
+            commands::discover_claude_accounts,
+            commands::import_claude_accounts,
+            commands::start_claude_login,
         ])
         .setup(move |app| {
             core.attach_app(app.handle().clone());
-            core.set_integration_enabled(claude_config::is_enabled(port));
 
-            // Start the proxy in the background; it runs for the app's lifetime.
-            let core_for_proxy = core.clone();
+            // Self-heal any stale proxy integration an older Clyde left in
+            // settings.json, then reflect whichever account Claude Code is set to.
+            if let Ok(true) = claude_sync::cleanup_legacy_integration() {
+                tracing::info!("removed a stale Clyde proxy integration from settings.json");
+            }
+            core.detect_active();
+            core.cleanup_orphan_login_dirs();
+
+            // Poll usage so the gauges fill even when no traffic flows: once now,
+            // then on a steady interval.
+            let core_for_poll = core.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = proxy::run(core_for_proxy, port).await {
-                    tracing::error!("proxy exited: {e:#}");
+                loop {
+                    core_for_poll.poll_usage().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
                 }
             });
 

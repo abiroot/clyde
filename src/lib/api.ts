@@ -1,10 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSnapshot, LoginStart, Mode } from "./types";
+import type { AppSnapshot, Discovered, LoginStart } from "./types";
 
 export const api = {
   getSnapshot: () => invoke<AppSnapshot>("get_snapshot"),
 
-  setMode: (mode: Mode) => invoke<AppSnapshot>("set_mode", { mode }),
+  discoverClaudeAccounts: () =>
+    invoke<Discovered[]>("discover_claude_accounts"),
+
+  importClaudeAccounts: (configDirs: string[]) =>
+    invoke<AppSnapshot>("import_claude_accounts", { configDirs }),
+
+  startClaudeLogin: () => invoke<string>("start_claude_login"),
+
+  setActiveAccount: (id: string) =>
+    invoke<AppSnapshot>("set_active_account", { id }),
 
   renameAccount: (id: string, label: string) =>
     invoke<AppSnapshot>("rename_account", { id, label }),
@@ -18,8 +27,4 @@ export const api = {
 
   importToken: (label: string, tokenJson: string) =>
     invoke<AppSnapshot>("import_token", { label, tokenJson }),
-
-  enableIntegration: () => invoke<AppSnapshot>("enable_integration"),
-
-  disableIntegration: () => invoke<AppSnapshot>("disable_integration"),
 };

@@ -81,9 +81,9 @@
 }
 
 @layer utilities {
-  .drag {
-    -webkit-app-region: drag;
-  }
+  /* Window dragging uses `data-tauri-drag-region` (OS-level), not the
+     `-webkit-app-region` CSS hack — it's unreliable on macOS. `.no-drag` stays
+     for interactive controls that overlap the native title-bar strip. */
   .no-drag {
     -webkit-app-region: no-drag;
   }

@@ -10,9 +10,12 @@ src/                 React + TypeScript UI (Vite, Tailwind v4)
   views/             Dashboard / Onboarding
   lib/               typed Tauri bridge, hooks, helpers
 src-tauri/src/       Rust core
-  proxy.rs           the auth proxy
-  engine.rs          state + routing
-  oauth.rs vault.rs  tokens
+  engine.rs          state + active selection + usage polling
+  claude_sync.rs     writes the active account into Claude Code's store
+  import_claude.rs   import existing Claude Code logins
+  oauth.rs           PKCE browser login, profile lookup, token refresh
+  usage.rs           parse GET /api/oauth/usage
+  vault.rs           Clyde's own account list in the OS keychain
 ```
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the design.
@@ -30,16 +33,17 @@ You'll need Rust (stable) and Node 20+.
 
 ```bash
 npm run build                         # typecheck + bundle the UI
-cargo fmt --manifest-path src-tauri/Cargo.toml
+cargo fmt   --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo test  --manifest-path src-tauri/Cargo.toml
 ```
 
 ## Guidelines
 
 - Keep the UI **calm and self-explanatory** — no jargon in the happy path.
 - Never log or persist tokens outside the keychain.
-- The proxy is on the hot path: avoid buffering response bodies; keep streaming.
+- Switching rewrites Claude Code's own keychain entry + `.claude.json` in place —
+  preserve any keys you don't own, and always target the default `~/.claude`.
 - Match the surrounding code style; prefer small, reviewable PRs.
 
 ## Scope & conduct

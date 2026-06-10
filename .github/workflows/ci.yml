@@ -36,5 +36,5 @@ jobs:
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
-      - name: Cargo check
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml

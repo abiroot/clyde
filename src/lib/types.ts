@@ -17,18 +17,23 @@ export interface AccountView {
   is_active: boolean;
 }
 
-export type Mode = { kind: "auto" } | { kind: "pinned"; accountId: string };
-
 export interface AppSnapshot {
   accounts: AccountView[];
-  mode: Mode;
+  /** The account Clyde has made active in Claude Code's credential store. */
   active_id: string | null;
-  proxy_port: number;
-  proxy_running: boolean;
-  integration_enabled: boolean;
+  /** Email of the active account, for the title bar. */
+  active_email: string | null;
 }
 
 export interface LoginStart {
   flow_id: string;
   authorize_url: string;
+}
+
+export interface Discovered {
+  id: string;
+  config_dir: string;
+  label: string;
+  email: string | null;
+  subscription_type: string | null;
 }

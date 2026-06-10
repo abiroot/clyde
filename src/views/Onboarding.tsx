@@ -36,7 +36,7 @@ export function Onboarding({ onAdd }: Props) {
         onClick={onAdd}
         className="no-drag mt-7 flex items-center gap-2 rounded-xl bg-[var(--color-clay)] px-5 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90"
       >
-        <Plus size={16} /> Add your first account
+        <Plus size={16} /> Import your Claude accounts
       </button>
     </div>
   );

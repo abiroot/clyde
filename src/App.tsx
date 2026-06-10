@@ -9,20 +9,22 @@ import { AddAccountDialog } from "./components/AddAccountDialog";
 export default function App() {
   const { snapshot, setSnapshot } = useSnapshot();
   const [showAdd, setShowAdd] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   if (!snapshot) return <Splash />;
 
   const apply = (p: Promise<AppSnapshot>) => p.then(setSnapshot).catch(console.error);
 
-  const wrapBusy = async (fn: () => Promise<AppSnapshot>) => {
-    setBusy(true);
+  const activate = async (id: string) => {
+    setBusyId(id);
+    setError(null);
     try {
-      setSnapshot(await fn());
+      setSnapshot(await api.setActiveAccount(id));
     } catch (e) {
-      console.error(e);
+      setError(String(e));
     } finally {
-      setBusy(false);
+      setBusyId(null);
     }
   };
 
@@ -30,21 +32,32 @@ export default function App() {
     <div className="relative z-10 flex h-full flex-col">
       <TitleBar snapshot={snapshot} />
 
-      {snapshot.accounts.length === 0 ? (
-        <Onboarding onAdd={() => setShowAdd(true)} />
-      ) : (
-        <Dashboard
-          snapshot={snapshot}
-          busy={busy}
-          onAdd={() => setShowAdd(true)}
-          onPin={(id) => apply(api.setMode({ kind: "pinned", accountId: id }))}
-          onAuto={() => apply(api.setMode({ kind: "auto" }))}
-          onRename={(id, label) => apply(api.renameAccount(id, label))}
-          onRemove={(id) => apply(api.removeAccount(id))}
-          onEnable={() => wrapBusy(api.enableIntegration)}
-          onDisable={() => wrapBusy(api.disableIntegration)}
-        />
-      )}
+      <main className="flex flex-1 flex-col overflow-hidden">
+        {error && (
+          <div className="mx-4 mt-1 mb-2 flex items-start justify-between gap-2 rounded-lg border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 px-3 py-2 text-[11px] text-[var(--color-danger)]">
+            <span className="leading-snug">Couldn't switch account: {error}</span>
+            <button
+              onClick={() => setError(null)}
+              className="shrink-0 font-medium hover:opacity-70"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {snapshot.accounts.length === 0 ? (
+          <Onboarding onAdd={() => setShowAdd(true)} />
+        ) : (
+          <Dashboard
+            snapshot={snapshot}
+            busyId={busyId}
+            onAdd={() => setShowAdd(true)}
+            onActivate={activate}
+            onRename={(id, label) => apply(api.renameAccount(id, label))}
+            onRemove={(id) => apply(api.removeAccount(id))}
+          />
+        )}
+      </main>
 
       {showAdd && (
         <AddAccountDialog
@@ -59,30 +72,49 @@ export default function App() {
   );
 }
 
+/**
+ * The window's draggable title bar. Uses `data-tauri-drag-region` (the OS-level
+ * drag API) rather than the `-webkit-app-region` CSS hack, which is unreliable
+ * on macOS. Decorative children are `pointer-events-none` so a mousedown lands
+ * on the header itself and starts the drag; the left inset clears the native
+ * traffic-light buttons.
+ */
 function TitleBar({ snapshot }: { snapshot: AppSnapshot }) {
-  const ok = snapshot.proxy_running;
+  const active =
+    snapshot.active_email ??
+    snapshot.accounts.find((a) => a.id === snapshot.active_id)?.label;
+
   return (
-    <div className="drag flex items-center justify-between px-4 pb-3 pt-3.5 pl-[78px]">
-      <div className="flex items-center gap-2">
+    <header
+      data-tauri-drag-region
+      className="relative flex h-12 shrink-0 select-none items-center justify-between gap-3 pl-[78px] pr-4"
+    >
+      <div
+        data-tauri-drag-region
+        className="pointer-events-none flex min-w-0 items-center gap-2"
+      >
         <span className="text-sm font-semibold tracking-tight">Clyde</span>
-        <span className="text-[11px] text-[var(--color-ink-faint)]">
+        <span className="truncate text-[11px] text-[var(--color-ink-faint)]">
           Claude account switcher
         </span>
       </div>
-      <div
-        className="flex items-center gap-1.5 text-[11px]"
-        title={ok ? "Proxy running" : "Proxy offline"}
-      >
-        <span
-          className="h-2 w-2 rounded-full"
-          style={{
-            background: ok ? "var(--color-ok)" : "var(--color-ink-faint)",
-            boxShadow: ok ? "0 0 6px var(--color-ok)" : "none",
-          }}
-        />
-        <span className="text-[var(--color-ink-faint)]">{ok ? "live" : "offline"}</span>
-      </div>
-    </div>
+
+      {active && (
+        <div
+          data-tauri-drag-region
+          className="pointer-events-none flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--color-ink-faint)]"
+        >
+          <span
+            className="h-2 w-2 rounded-full"
+            style={{
+              background: "var(--color-ok)",
+              boxShadow: "0 0 6px var(--color-ok)",
+            }}
+          />
+          <span className="max-w-[160px] truncate">{active}</span>
+        </div>
+      )}
+    </header>
   );
 }
 

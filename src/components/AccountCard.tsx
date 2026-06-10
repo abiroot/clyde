@@ -1,24 +1,22 @@
 import { useState } from "react";
-import { Check, Pin, PinOff, Pencil, Trash2, X } from "lucide-react";
-import type { AccountView, Mode } from "../lib/types";
+import { Check, CheckCircle2, Pencil, Trash2, X } from "lucide-react";
+import type { AccountView } from "../lib/types";
 import { UsageGauge } from "./UsageGauge";
 import { resetsIn } from "../lib/format";
 
 interface Props {
   account: AccountView;
-  mode: Mode;
-  onPin: (id: string) => void;
-  onUnpin: () => void;
+  busy: boolean;
+  onActivate: (id: string) => void;
   onRename: (id: string, label: string) => void;
   onRemove: (id: string) => void;
 }
 
-export function AccountCard({ account, mode, onPin, onUnpin, onRename, onRemove }: Props) {
+export function AccountCard({ account, busy, onActivate, onRename, onRemove }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(account.label);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const pinned = mode.kind === "pinned" && mode.accountId === account.id;
   const limited = account.usage.status === "rejected";
   const resets = resetsIn(account.usage.resets_at);
   const initial = (account.label || "?").trim().charAt(0).toUpperCase();
@@ -93,19 +91,24 @@ export function AccountCard({ account, mode, onPin, onUnpin, onRename, onRemove 
           )}
         </div>
 
-        {!editing && (
-          <button
-            title={pinned ? "Unpin (return to auto)" : "Pin to this account"}
-            onClick={() => (pinned ? onUnpin() : onPin(account.id))}
-            className={`no-drag rounded-lg p-1.5 transition-colors ${
-              pinned
-                ? "text-[var(--color-clay)] bg-[var(--color-clay)]/10"
-                : "text-[var(--color-ink-faint)] hover:bg-white/5 hover:text-[var(--color-ink-soft)]"
-            }`}
-          >
-            {pinned ? <Pin size={16} /> : <PinOff size={16} />}
-          </button>
-        )}
+        {!editing &&
+          (account.is_active ? (
+            <span
+              title="Active in Claude Code"
+              className="no-drag flex items-center gap-1 rounded-lg px-1.5 py-1 text-[var(--color-ok)]"
+            >
+              <CheckCircle2 size={16} />
+            </span>
+          ) : (
+            <button
+              title="Make this the account Claude Code uses"
+              disabled={busy}
+              onClick={() => onActivate(account.id)}
+              className="no-drag rounded-lg bg-[var(--color-clay)]/10 px-2.5 py-1 text-xs font-medium text-[var(--color-clay-soft)] transition-colors hover:bg-[var(--color-clay)]/20 disabled:opacity-50"
+            >
+              {busy ? "Switching…" : "Use"}
+            </button>
+          ))}
       </div>
 
       {/* Gauges */}

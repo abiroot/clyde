@@ -1,19 +1,14 @@
 import { Plus } from "lucide-react";
 import type { AppSnapshot } from "../lib/types";
 import { AccountCard } from "../components/AccountCard";
-import { RoutingBar } from "../components/RoutingBar";
-import { IntegrationCard } from "../components/IntegrationCard";
 
 interface Props {
   snapshot: AppSnapshot;
-  busy: boolean;
+  busyId: string | null;
   onAdd: () => void;
-  onPin: (id: string) => void;
-  onAuto: () => void;
+  onActivate: (id: string) => void;
   onRename: (id: string, label: string) => void;
   onRemove: (id: string) => void;
-  onEnable: () => void;
-  onDisable: () => void;
 }
 
 export function Dashboard(props: Props) {
@@ -21,15 +16,6 @@ export function Dashboard(props: Props) {
 
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4">
-      <IntegrationCard
-        snapshot={snapshot}
-        busy={props.busy}
-        onEnable={props.onEnable}
-        onDisable={props.onDisable}
-      />
-
-      <RoutingBar snapshot={snapshot} onAuto={props.onAuto} />
-
       <div className="flex items-center justify-between px-1 pt-1">
         <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-ink-faint)]">
           Accounts · {snapshot.accounts.length}
@@ -47,14 +33,19 @@ export function Dashboard(props: Props) {
           <AccountCard
             key={account.id}
             account={account}
-            mode={snapshot.mode}
-            onPin={props.onPin}
-            onUnpin={props.onAuto}
+            busy={props.busyId === account.id}
+            onActivate={props.onActivate}
             onRename={props.onRename}
             onRemove={props.onRemove}
           />
         ))}
       </div>
+
+      <p className="px-1 pt-0.5 text-[11px] leading-relaxed text-[var(--color-ink-faint)]">
+        Switching rewrites Claude Code's login in place. A running session keeps
+        its old account until it exits — to pick up the new one without losing
+        context, start <code>claude -c</code> (continue) in your terminal.
+      </p>
     </div>
   );
 }

@@ -24,20 +24,31 @@ fn client_id() -> String {
 
 fn token_url() -> String {
     std::env::var("CLYDE_OAUTH_TOKEN_URL")
-        .unwrap_or_else(|_| "https://console.anthropic.com/v1/oauth/token".to_string())
+        .unwrap_or_else(|_| "https://platform.claude.com/v1/oauth/token".to_string())
 }
 
 fn authorize_url_base() -> String {
+    // Claude Code's subscription (claude.ai) login authorizes here. Anthropic
+    // moved this from `https://claude.ai/oauth/authorize` to the path below; the
+    // old host now rejects the request with "Invalid request format".
     std::env::var("CLYDE_OAUTH_AUTHORIZE_URL")
-        .unwrap_or_else(|_| "https://claude.ai/oauth/authorize".to_string())
+        .unwrap_or_else(|_| "https://claude.com/cai/oauth/authorize".to_string())
 }
 
 fn redirect_uri() -> String {
     std::env::var("CLYDE_OAUTH_REDIRECT_URI")
-        .unwrap_or_else(|_| "https://console.anthropic.com/oauth/code/callback".to_string())
+        .unwrap_or_else(|_| "https://platform.claude.com/oauth/code/callback".to_string())
 }
 
-const SCOPES: &str = "org:create_api_key user:profile user:inference";
+fn api_base() -> String {
+    std::env::var("CLYDE_UPSTREAM").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
+}
+
+// Exact scope set Claude Code requests for its subscription login (`U68` in the
+// binary, verified live). The order and full set matter: requesting a subset
+// against `claude.com/cai` makes the grant fail with "Invalid request format".
+const SCOPES: &str =
+    "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 /// One in-flight PKCE login attempt. Hold onto `verifier` until the user pastes
 /// back the authorization code, then call [`exchange_code`].
@@ -57,26 +68,39 @@ pub fn begin_login() -> Result<PkceChallenge> {
         b64url(&digest)
     };
 
+    // 32 bytes, matching Claude Code. claude.ai's authorize grant rejects a
+    // shorter state (Clyde used to send 16 bytes) with "Invalid request format".
     let state = {
-        let mut s = [0u8; 16];
+        let mut s = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut s);
         b64url(&s)
     };
 
-    let mut url = url::Url::parse(&authorize_url_base()).context("parsing authorize url")?;
-    url.query_pairs_mut()
-        .append_pair("code", "true")
-        .append_pair("client_id", &client_id())
-        .append_pair("response_type", "code")
-        .append_pair("redirect_uri", &redirect_uri())
-        .append_pair("scope", SCOPES)
-        .append_pair("code_challenge", &challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("state", &state);
+    // Build with proper form-encoding (spaces → `+`, colons → `%3A`), exactly
+    // like Claude Code's `URLSearchParams`. The `claude.com/cai` authorize
+    // endpoint requires this — a hand-rolled query with raw colons / `%20`
+    // separators is what made the grant fail with "Invalid request format".
+    let cid = client_id();
+    let redirect = redirect_uri();
+    let authorize_url = reqwest::Url::parse_with_params(
+        &authorize_url_base(),
+        &[
+            ("code", "true"),
+            ("client_id", cid.as_str()),
+            ("response_type", "code"),
+            ("redirect_uri", redirect.as_str()),
+            ("scope", SCOPES),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("state", state.as_str()),
+        ],
+    )
+    .context("building authorize URL")?
+    .to_string();
 
     Ok(PkceChallenge {
         verifier,
-        authorize_url: url.to_string(),
+        authorize_url,
     })
 }
 
@@ -175,4 +199,99 @@ pub async fn refresh(http: &reqwest::Client, refresh_token: &str) -> Result<Cred
 
 fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorize_url_matches_claude_code_shape() {
+        let c = begin_login().unwrap();
+        let u = &c.authorize_url;
+        // Right endpoint (claude.com/cai, not the rejecting claude.ai host).
+        assert!(
+            u.starts_with("https://claude.com/cai/oauth/authorize?"),
+            "{u}"
+        );
+        // Form-encoded scope: `+` separators and `%3A` colons (not raw `%20`/`:`).
+        assert!(
+            u.contains("scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload"),
+            "scope wrongly encoded: {u}"
+        );
+        // Redirect URI fully percent-encoded.
+        assert!(
+            u.contains("redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"),
+            "{u}"
+        );
+        assert!(
+            u.contains("code=true") && u.contains("code_challenge_method=S256"),
+            "{u}"
+        );
+        // 32-byte state (43 base64url chars). A shorter state makes claude.ai's
+        // grant fail with "Invalid request format".
+        let state = u.rsplit("state=").next().unwrap();
+        assert_eq!(
+            state.len(),
+            43,
+            "state must be 32 bytes (43 chars): {state:?}"
+        );
+    }
+}
+
+/// Identity for an account, read from `GET /api/oauth/profile`. Claude's access
+/// tokens are opaque (not JWTs), so this endpoint — the same one Claude Code
+/// uses — is the only way to learn an account's email and plan from a token.
+#[derive(Debug, Clone, Default)]
+pub struct Profile {
+    pub email: Option<String>,
+    pub full_name: Option<String>,
+    /// Raw `subscriptionType` Claude Code stores: `"max"` or `"pro"`.
+    pub subscription_raw: Option<String>,
+    /// e.g. `"default_claude_max_20x"`.
+    pub rate_limit_tier: Option<String>,
+}
+
+/// Look up an account's identity from its access token. Best-effort: any network
+/// or shape error surfaces as `Err`, and callers fall back to what they have.
+pub async fn fetch_profile(http: &reqwest::Client, access_token: &str) -> Result<Profile> {
+    let url = format!("{}/api/oauth/profile", api_base().trim_end_matches('/'));
+    let resp = http
+        .get(url)
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .context("requesting /api/oauth/profile")?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("profile endpoint returned {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await.context("parsing profile response")?;
+    let account = v.get("account");
+    let org = v.get("organization");
+
+    let str_at = |obj: Option<&serde_json::Value>, key: &str| {
+        obj.and_then(|o| o.get(key))
+            .and_then(|x| x.as_str())
+            .map(String::from)
+    };
+    let bool_at = |obj: Option<&serde_json::Value>, key: &str| {
+        obj.and_then(|o| o.get(key)).and_then(|x| x.as_bool())
+    };
+
+    let subscription_raw = if bool_at(account, "has_claude_max") == Some(true) {
+        Some("max".to_string())
+    } else if bool_at(account, "has_claude_pro") == Some(true) {
+        Some("pro".to_string())
+    } else {
+        None
+    };
+
+    Ok(Profile {
+        email: str_at(account, "email"),
+        full_name: str_at(account, "full_name").or_else(|| str_at(account, "display_name")),
+        subscription_raw,
+        rate_limit_tier: str_at(org, "rate_limit_tier"),
+    })
 }
