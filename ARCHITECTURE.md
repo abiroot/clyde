@@ -63,7 +63,9 @@ unsuffixed keychain service), regardless of any `CLAUDE_CONFIG_DIR` the Clyde
 process itself may have inherited.
 
 On startup, `detect_active` reconciles Clyde's idea of the active account with
-whichever one Claude Code's keychain actually holds (matched by token), and
+whichever one Claude Code's keychain actually holds (matched by token lineage,
+falling back to the identity in `~/.claude/.claude.json`; if neither matches a
+stored account, none is claimed active), and
 `cleanup_legacy_integration` strips any dead proxy keys (a throwaway `apiKeyHelper`
 and a localhost `ANTHROPIC_BASE_URL`) that an older Clyde version may have left in
 `settings.json`.
@@ -77,10 +79,11 @@ same endpoint Claude Code's own status line uses — and parses the JSON
 `UsageSnapshot`. This sends no messages, so it costs no quota; an earlier version
 read rate-limit headers off a throwaway `max_tokens: 1` request, which did.
 
-Before polling, it first pulls the active account's current credential back out of
-Claude Code's keychain (`sync_active_credential_from_keychain`) — because Claude
-Code rotates that token on its own, and Clyde must not fight it over the refresh
-token.
+Before polling, it first reconciles the keychain slot with the vault
+(`adopt_active_slot`) — because Claude Code rotates that token on its own, and
+Clyde must not fight it over the refresh token. The reconcile is bidirectional
+and identity-checked: whichever side holds the newer token generation wins, and
+a credential is only ever adopted into the account it provably belongs to.
 
 ## Adding accounts
 
@@ -105,8 +108,24 @@ the same account if it's later discovered on disk rather than duplicating.
 
 ## Token lifecycle
 
-Each account's `refresh_token` lives in Clyde's keychain vault. `Core::valid_bearer`
-refreshes an access token when it's within `REFRESH_SKEW_MS` (60s) of expiry,
-serializes concurrent refreshes behind a `tokio::Mutex`, and persists the rotated
-credential. The UI never sees tokens — only `AccountView` DTOs, pushed over the
+Each account's `refresh_token` lives in Clyde's keychain vault. **Anthropic's
+refresh tokens are single-use**: every refresh consumes the old token and issues a
+new pair, so whoever holds a stale generation is one refresh attempt away from a
+forced logout. Everything below exists to keep all copies on the latest generation:
+
+- `Core::valid_bearer` refreshes an access token when it's within
+  `REFRESH_SKEW_MS` (60s) of expiry, serializes concurrent refreshes behind a
+  `tokio::Mutex`, and persists the rotated credential. When the account owns the
+  keychain slot, the rotation is **pushed back into the keychain**
+  (`write_active_credential`, guarded so a `claude /login` the user did in the
+  meantime is never clobbered) — otherwise the next `claude` run would try the
+  consumed refresh token and log itself out.
+- If a refresh of the active account fails, the keychain is re-read and the
+  refresh retried once with the live generation — a running `claude` may have
+  rotated it after Clyde last synced.
+- `resync_credential_from_source` only adopts a source dir's credential when it
+  is a strictly newer generation (`Credential::is_newer_than`); source keychains
+  go stale the moment Clyde refreshes the account itself.
+
+The UI never sees tokens — only `AccountView` DTOs, pushed over the
 `clyde://update` Tauri event.

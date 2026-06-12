@@ -62,11 +62,18 @@ any stale proxy integration a previous version left in `settings.json`
 
 - `Core` is an `Arc` held as Tauri managed state, shared across all commands. State lives behind
   an `RwLock`; concurrent token refreshes serialize behind a `tokio::Mutex` (`refresh_lock`).
-- `Core::valid_bearer` refreshes an access token within `REFRESH_SKEW_MS` (60s) of expiry and
-  persists the rotated credential.
+- **Refresh tokens are single-use (rotating).** Any code that refreshes, imports, or copies a
+  credential must keep every copy on the latest generation — adopting an older generation means
+  adopting a consumed refresh token, i.e. a forced logout. `Credential::is_newer_than` is the
+  comparison; `Core::adopt_active_slot` is the bidirectional, identity-checked reconcile between
+  the vault and Claude Code's keychain slot.
+- `Core::valid_bearer` refreshes an access token within `REFRESH_SKEW_MS` (60s) of expiry,
+  persists the rotated credential, and — when the account owns the keychain slot — pushes the
+  rotation back into the keychain (`claude_sync::write_active_credential`, guarded against
+  clobbering a `claude /login` done in the meantime).
 - `poll_usage` runs on a 120s loop (see `lib.rs` `setup`), reading `GET /api/oauth/usage` per
   account (the same endpoint Claude Code's status line uses — no quota cost) so gauges fill even
-  with no traffic.
+  with no traffic. It reconciles the keychain slot first.
 - After any state change, `Core::emit` pushes an `AppSnapshot` to the frontend over the
   `clyde://update` Tauri event (`UPDATE_EVENT`). The UI never sees raw tokens — only DTOs.
 

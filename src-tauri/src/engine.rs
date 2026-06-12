@@ -151,18 +151,33 @@ impl Core {
     /// write it into Claude Code's keychain + `.claude.json`. Takes effect for
     /// the next `claude` run.
     pub async fn set_active(&self, id: &str) -> Result<()> {
-        // **Save the outgoing account's live token first** — Claude Code may have
-        // refreshed it since we last saw it, and we'll lose it once we overwrite
-        // the keychain. This makes switching reversible.
-        self.save_outgoing_credential();
+        // Pull the live keychain credential back into whichever stored account
+        // it belongs to — Claude Code may have rotated it since we wrote it,
+        // and the rotation would be lost once we overwrite the slot.
+        self.adopt_active_slot();
 
-        // Our stored token may be a stale snapshot; pull the live one from the
-        // source config dir first (Claude Code keeps those fresh).
+        // If the user ran `claude` against this account's source config dir,
+        // that dir holds a newer credential than ours; adopt it.
         self.resync_credential_from_source(id);
-        // Hand Claude Code a fresh, non-expired token.
-        self.valid_bearer(id)
-            .await
-            .context("refreshing the account token before switching")?;
+
+        // Hand Claude Code a fresh token. A transient failure (network blip)
+        // shouldn't block switching while the stored token is still valid —
+        // `claude` refreshes on its own at startup.
+        if let Err(e) = self.valid_bearer(id).await {
+            let still_valid = self
+                .credential(id)
+                .is_some_and(|c| !c.is_stale(now_ms(), 0));
+            if still_valid {
+                tracing::warn!(
+                    "pre-switch refresh failed; switching with the current token: {e:#}"
+                );
+            } else {
+                return Err(e.context(
+                    "couldn't refresh this account's token — its saved login may have expired; remove the account and add it again",
+                ));
+            }
+        }
+
         let account = self
             .account(id)
             .ok_or_else(|| anyhow!("unknown account {id}"))?;
@@ -176,49 +191,72 @@ impl Core {
         Ok(())
     }
 
-    /// Before switching away from the current account, save its live credential
-    /// from the keychain back to our vault — so we don't lose it when we
-    /// overwrite the keychain with the new account's token.
-    fn save_outgoing_credential(&self) {
-        let Some(active_id) = self.state.read().unwrap().active_id.clone() else {
-            return;
-        };
-        let Some(live_cred) = claude_sync::read_active_credential() else {
-            return;
-        };
-        let (should_save, email_for_log) = {
+    /// Reconcile Claude Code's shared keychain slot with our vault, in both
+    /// directions. Works out which stored account the slot's credential belongs
+    /// to (token lineage first, then the identity in `~/.claude/.claude.json`)
+    /// and then adopts whichever side holds the newer token generation: the
+    /// keychain's, when a running `claude` rotated it on its own; the vault's,
+    /// when a past Clyde refresh never made it back into the keychain (leaving
+    /// `claude` a consumed refresh token — a forced logout on its next run).
+    /// Matching is identity-checked so credentials can never cross between
+    /// accounts. Returns the matched account's id.
+    fn adopt_active_slot(&self) -> Option<String> {
+        let live = claude_sync::read_active_credential()?;
+        let email = claude_sync::read_active_identity_email();
+
+        let (id, repair) = {
             let mut s = self.state.write().unwrap();
-            if let Some(a) = s.accounts.iter_mut().find(|a| a.id == active_id) {
-                let email = a.email.clone().unwrap_or_else(|| a.id.clone());
-                a.credential = live_cred;
-                (true, email)
-            } else {
-                (false, String::new())
+            let idx = s
+                .accounts
+                .iter()
+                .position(|a| {
+                    (!live.refresh_token.is_empty()
+                        && a.credential.refresh_token == live.refresh_token)
+                        || a.credential.access_token == live.access_token
+                })
+                .or_else(|| {
+                    let email = email.as_deref()?;
+                    s.accounts
+                        .iter()
+                        .position(|a| a.email.as_deref() == Some(email))
+                })?;
+
+            let mut repair = None;
+            if live.is_newer_than(&s.accounts[idx].credential) {
+                let who = s.accounts[idx]
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| s.accounts[idx].id.clone());
+                s.accounts[idx].credential = live.clone();
+                let _ = vault::save_accounts(&s.accounts);
+                tracing::info!("adopted a rotated credential from the keychain for {who}");
+            } else if s.accounts[idx].credential.is_newer_than(&live) {
+                repair = Some(s.accounts[idx].credential.clone());
             }
+            (s.accounts[idx].id.clone(), repair)
         };
-        if should_save {
-            let s = self.state.read().unwrap();
-            let _ = vault::save_accounts(&s.accounts);
-            tracing::info!(
-                "saved outgoing credential for {} before switch",
-                email_for_log
-            );
+
+        if let Some(cred) = repair {
+            match claude_sync::write_active_credential(&cred, &live) {
+                Ok(true) => {
+                    tracing::info!("repaired the keychain slot with our newer credential")
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("couldn't repair the keychain slot: {e:#}"),
+            }
         }
+        Some(id)
     }
 
     /// Reconcile `active_id` with whichever account Claude Code is actually set
-    /// to right now (matched by token), falling back to the first account.
-    /// Also syncs all account credentials from their source config dirs.
+    /// to right now. Also recovers newer credentials from source config dirs
+    /// and the shared keychain slot.
     pub fn detect_active(&self) {
-        // First, sync ALL accounts' credentials from their source dirs.
-        // This recovers from stale tokens in the vault.
         self.sync_all_credentials_from_sources();
 
-        let resolved = {
-            let s = self.state.read().unwrap();
-            claude_sync::current_active(&s.accounts)
-                .or_else(|| s.accounts.first().map(|a| a.id.clone()))
-        };
+        // No "first account" fallback: claiming an account is active while the
+        // keychain actually holds someone else's login is how tokens cross.
+        let resolved = self.adopt_active_slot();
         {
             let mut s = self.state.write().unwrap();
             s.active_id = resolved;
@@ -312,9 +350,8 @@ impl Core {
             // Never resync from the default `~/.claude`: its keychain is the
             // shared slot Clyde overwrites on every switch, so it holds whichever
             // account is *currently active* — reading it here would cross this
-            // account's stored token with another's. The default-dir account stays
-            // fresh via `sync_active_credential_from_keychain` (while active) and
-            // its refresh token (while not).
+            // account's stored token with another's. The default slot is handled
+            // by `adopt_active_slot`, which matches the credential to its owner.
             if import_claude::is_default_config_dir(&dir) {
                 continue;
             }
@@ -322,36 +359,28 @@ impl Core {
                 continue;
             };
             let mut s = self.state.write().unwrap();
-            if let Some(a) = s.accounts.iter_mut().find(|a| a.id == id) {
+            let Some(a) = s.accounts.iter_mut().find(|a| a.id == id) else {
+                return;
+            };
+            // Source keychains go stale the moment Clyde refreshes this account:
+            // a refresh *consumes* the old refresh token, so blindly adopting the
+            // source copy would store a dead token — the resulting invalid_grant
+            // is a forced logout. Only adopt a strictly newer generation, i.e.
+            // the user actually ran `claude` in that dir since our last refresh.
+            let mut changed = false;
+            if fresh.credential.is_newer_than(&a.credential) {
                 a.credential = fresh.credential;
-                if fresh.oauth_account.is_some() {
-                    a.oauth_account = fresh.oauth_account;
-                }
-                if a.source_config_dir.is_none() {
-                    a.source_config_dir = Some(dir);
-                }
-                let _ = vault::save_accounts(&s.accounts);
+                changed = true;
             }
-            return;
-        }
-    }
-
-    /// Claude Code refreshes/rotates the active account's token on its own. Pull
-    /// the live credential back from the keychain so Clyde's copy stays valid
-    /// (and our usage probe doesn't fight Claude Code over the refresh token).
-    fn sync_active_credential_from_keychain(&self) {
-        let Some(active) = self.state.read().unwrap().active_id.clone() else {
-            return;
-        };
-        let Some(cred) = claude_sync::read_active_credential() else {
-            return;
-        };
-        let mut s = self.state.write().unwrap();
-        if let Some(a) = s.accounts.iter_mut().find(|a| a.id == active) {
-            if a.credential.access_token != cred.access_token
-                || a.credential.refresh_token != cred.refresh_token
-            {
-                a.credential = cred;
+            if fresh.oauth_account.is_some() && a.oauth_account.is_none() {
+                a.oauth_account = fresh.oauth_account;
+                changed = true;
+            }
+            if a.source_config_dir.is_none() {
+                a.source_config_dir = Some(dir.clone());
+                changed = true;
+            }
+            if changed {
                 let _ = vault::save_accounts(&s.accounts);
             }
         }
@@ -370,8 +399,22 @@ impl Core {
     /// Probe every account's live usage with a tiny request, so the gauges fill
     /// even when no traffic is flowing.
     pub async fn poll_usage(&self) {
-        // Keep the active account's stored token current with Claude Code first.
-        self.sync_active_credential_from_keychain();
+        // Keep our copy of the active slot current with claude's own rotations,
+        // and follow along if the user switched accounts via `claude /login`.
+        if let Some(id) = self.adopt_active_slot() {
+            let changed = {
+                let mut s = self.state.write().unwrap();
+                if s.active_id.as_deref() != Some(id.as_str()) {
+                    s.active_id = Some(id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                self.emit();
+            }
+        }
 
         let ids: Vec<String> = {
             let s = self.state.read().unwrap();
@@ -410,7 +453,10 @@ impl Core {
     }
 
     /// Return a valid (fresh) access token for `account_id`, refreshing if it's
-    /// stale and persisting the rotated credential.
+    /// stale and persisting the rotated credential. When the account owns Claude
+    /// Code's keychain slot, the rotation is pushed there too — refresh tokens
+    /// are single-use, so leaving the consumed one in the keychain would log
+    /// the next `claude` run out.
     pub async fn valid_bearer(&self, account_id: &str) -> Result<String> {
         // Fast path: token still good.
         if let Some(cred) = self.credential(account_id) {
@@ -423,17 +469,58 @@ impl Core {
 
         // Slow path: serialize refreshes so concurrent requests don't stampede.
         let _guard = self.refresh_lock.lock().await;
-        if let Some(cred) = self.credential(account_id) {
-            if !cred.is_stale(now_ms(), REFRESH_SKEW_MS) {
-                return Ok(cred.access_token); // someone else refreshed
-            }
-            let refreshed = oauth::refresh(&self.http, &cred.refresh_token).await?;
-            let token = refreshed.access_token.clone();
-            self.update_credential(account_id, refreshed)?;
-            Ok(token)
-        } else {
-            Err(anyhow!("unknown account {account_id}"))
+        let Some(cred) = self.credential(account_id) else {
+            return Err(anyhow!("unknown account {account_id}"));
+        };
+        if !cred.is_stale(now_ms(), REFRESH_SKEW_MS) {
+            return Ok(cred.access_token); // someone else refreshed
         }
+
+        let is_active = self.is_active(account_id);
+        let mut prev = cred;
+        let refreshed = match oauth::refresh(&self.http, &prev.refresh_token, &prev.scopes).await {
+            Ok(r) => r,
+            Err(e) => {
+                // A running `claude` may have rotated the active slot after we
+                // last synced, consuming the refresh token we just tried. Re-read
+                // the keychain and go again with the live generation.
+                let live = is_active
+                    .then(claude_sync::read_active_credential)
+                    .flatten()
+                    .filter(|l| {
+                        !l.refresh_token.is_empty() && l.refresh_token != prev.refresh_token
+                    });
+                let Some(live) = live else { return Err(e) };
+                tracing::info!(
+                    "refresh for {account_id} failed but the keychain holds a newer generation; retrying with it"
+                );
+                if !live.is_stale(now_ms(), REFRESH_SKEW_MS) {
+                    let token = live.access_token.clone();
+                    self.update_credential(account_id, live)?;
+                    return Ok(token);
+                }
+                let r = oauth::refresh(&self.http, &live.refresh_token, &live.scopes).await?;
+                prev = live;
+                r
+            }
+        };
+
+        let token = refreshed.access_token.clone();
+        self.update_credential(account_id, refreshed.clone())?;
+        if is_active {
+            match claude_sync::write_active_credential(&refreshed, &prev) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!("keychain slot no longer holds {account_id}; left it alone")
+                }
+                Err(e) => tracing::warn!("couldn't push rotated credential to the keychain: {e:#}"),
+            }
+        }
+        Ok(token)
+    }
+
+    fn is_active(&self, id: &str) -> bool {
+        self.state.read().unwrap().active_id.as_deref() == Some(id)
     }
 
     fn credential(&self, account_id: &str) -> Option<Credential> {

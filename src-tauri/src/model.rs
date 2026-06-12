@@ -54,6 +54,16 @@ impl Credential {
     pub fn is_stale(&self, now_ms: i64, skew_ms: i64) -> bool {
         self.expires_at - skew_ms <= now_ms
     }
+
+    /// Whether this credential is a *newer generation* than `other`: a genuinely
+    /// different token with a later expiry. Anthropic's refresh tokens are
+    /// single-use — every refresh rotates the pair and pushes `expires_at`
+    /// forward, so the later expiry identifies who refreshed last. Adopting an
+    /// older generation means adopting a consumed refresh token, which is a
+    /// guaranteed logout the next time it's used.
+    pub fn is_newer_than(&self, other: &Credential) -> bool {
+        self.expires_at > other.expires_at && self.access_token != other.access_token
+    }
 }
 
 /// Live usage picture for an account, parsed from Anthropic's
@@ -96,4 +106,27 @@ pub struct AppSnapshot {
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cred(access: &str, expires_at: i64) -> Credential {
+        Credential {
+            access_token: access.into(),
+            refresh_token: format!("r-{access}"),
+            expires_at,
+            scopes: vec![],
+        }
+    }
+
+    #[test]
+    fn is_newer_than_requires_a_different_token_with_a_later_expiry() {
+        let stored = cred("a1", 1_000);
+        assert!(cred("a2", 2_000).is_newer_than(&stored), "later rotation");
+        assert!(!cred("a2", 500).is_newer_than(&stored), "older generation");
+        assert!(!cred("a1", 2_000).is_newer_than(&stored), "same token");
+        assert!(!cred("a2", 1_000).is_newer_than(&stored), "ambiguous tie");
+    }
 }

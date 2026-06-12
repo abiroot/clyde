@@ -94,25 +94,38 @@ fn read_account_attr() -> String {
 
 /// Write the secret back into the existing item in place. `-U` updates rather
 /// than duplicates, preserving the item's existing access-control list so plain
-/// `claude` keeps reading it without a prompt.
+/// `claude` keeps reading it without a prompt. The command goes through
+/// `security -i` (stdin) so the OAuth secret never appears in the process
+/// argument list, where any local process could read it via `ps`.
 fn write_secret(secret: &str, acct: &str) -> Result<()> {
-    let mut args: Vec<String> = vec![
-        "add-generic-password".into(),
-        "-U".into(),
-        "-s".into(),
-        SERVICE.into(),
-    ];
-    if !acct.is_empty() {
-        args.push("-a".into());
-        args.push(acct.into());
-    }
-    args.push("-w".into());
-    args.push(secret.into());
+    use std::io::Write;
+    use std::process::Stdio;
 
-    let out = Command::new("security")
-        .args(&args)
-        .output()
-        .context("running `security add-generic-password`")?;
+    // security(1)'s stdin parser supports double-quoted words with backslash
+    // escapes; serde-serialized JSON contains no raw newlines.
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut line = format!("add-generic-password -U -s \"{}\"", esc(SERVICE));
+    if !acct.is_empty() {
+        line.push_str(&format!(" -a \"{}\"", esc(acct)));
+    }
+    line.push_str(&format!(" -w \"{}\"\n", esc(secret)));
+
+    let mut child = Command::new("security")
+        .arg("-i")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running `security -i`")?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("no stdin handle for `security -i`"))?
+        .write_all(line.as_bytes())
+        .context("writing to `security -i`")?;
+    let out = child
+        .wait_with_output()
+        .context("waiting for `security -i`")?;
     if !out.status.success() {
         return Err(anyhow!(
             "security add-generic-password failed: {}",
@@ -147,7 +160,14 @@ pub fn activate(account: &Account) -> Result<()> {
         json!(account.credential.refresh_token),
     );
     oauth.insert("expiresAt".into(), json!(account.credential.expires_at));
-    oauth.insert("scopes".into(), json!(account.credential.scopes));
+    // Never write an empty scope list — Claude Code would see a scopeless
+    // session. Fall back to whatever the blob already carried.
+    let scopes = if account.credential.scopes.is_empty() {
+        prev.get("scopes").cloned().unwrap_or_else(|| json!([]))
+    } else {
+        json!(account.credential.scopes)
+    };
+    oauth.insert("scopes".into(), scopes);
 
     // Write *this* account's plan, not whatever the previous account left behind.
     let subscription = account.subscription_raw.clone().or_else(|| {
@@ -208,17 +228,71 @@ pub fn read_active_credential() -> Option<Credential> {
     })
 }
 
-/// Best-effort: which stored account is the one Claude Code is currently set to,
-/// matched by token. Used at startup so the UI reflects reality.
-pub fn current_active(accounts: &[Account]) -> Option<String> {
-    let cred = read_active_credential()?;
-    accounts
-        .iter()
-        .find(|a| {
-            (!cred.refresh_token.is_empty() && a.credential.refresh_token == cred.refresh_token)
-                || a.credential.access_token == cred.access_token
-        })
-        .map(|a| a.id.clone())
+/// Push a rotated credential for the currently active account back into Claude
+/// Code's keychain slot. Without this, a refresh Clyde performs (e.g. for usage
+/// polling) consumes the refresh token while the keychain keeps the dead old
+/// one — and the next `claude` run gets force-logged-out.
+///
+/// Guarded: only writes when the slot still holds the generation we rotated
+/// from (`expected_old`), so a login the user did via `claude /login` in the
+/// meantime is never clobbered. Returns whether the slot was updated.
+pub fn write_active_credential(new: &Credential, expected_old: &Credential) -> Result<bool> {
+    let Some(secret) = read_secret() else {
+        return Ok(false);
+    };
+    let Ok(Value::Object(mut root)) = serde_json::from_str(&secret) else {
+        return Ok(false);
+    };
+    let held_matches = root.get("claudeAiOauth").is_some_and(|o| {
+        let tok = |k: &str| o.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+        let same_old = (!expected_old.refresh_token.is_empty()
+            && tok("refreshToken") == expected_old.refresh_token)
+            || tok("accessToken") == expected_old.access_token;
+        let already_new = tok("accessToken") == new.access_token;
+        same_old || already_new
+    });
+    if !held_matches {
+        return Ok(false);
+    }
+    merge_credential(&mut root, new);
+    let secret = serde_json::to_string(&Value::Object(root))?;
+    write_secret(&secret, &read_account_attr())?;
+    Ok(true)
+}
+
+/// Update just the token fields of a credential blob, leaving identity/plan
+/// keys and sibling top-level keys (e.g. `mcpOAuth`) intact. An empty `scopes`
+/// keeps the blob's existing list — some refresh responses omit scopes, and
+/// writing `[]` would make Claude Code see a scopeless session.
+fn merge_credential(root: &mut Map<String, Value>, cred: &Credential) {
+    let oauth = root
+        .entry("claudeAiOauth")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !oauth.is_object() {
+        *oauth = Value::Object(Map::new());
+    }
+    let o = oauth.as_object_mut().expect("ensured object above");
+    o.insert("accessToken".into(), json!(cred.access_token));
+    o.insert("refreshToken".into(), json!(cred.refresh_token));
+    o.insert("expiresAt".into(), json!(cred.expires_at));
+    if !cred.scopes.is_empty() {
+        o.insert("scopes".into(), json!(cred.scopes));
+    } else if !o.contains_key("scopes") {
+        o.insert("scopes".into(), json!([]));
+    }
+}
+
+/// The email of the identity Claude Code currently displays, from
+/// `~/.claude/.claude.json` → `oauthAccount.emailAddress`. Tokens are opaque,
+/// so this is the only offline way to tell *whose* credential the shared
+/// keychain slot holds.
+pub fn read_active_identity_email() -> Option<String> {
+    let path = claude_json_path().ok()?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v.get("oauthAccount")?
+        .get("emailAddress")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// One-time self-heal: strip a stale proxy integration left in `settings.json`
@@ -321,6 +395,38 @@ mod tests {
         let d = std::env::temp_dir().join(format!("clyde_test_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn merge_credential_updates_tokens_but_preserves_everything_else() {
+        let mut root: Map<String, Value> = serde_json::from_str(
+            r#"{
+                "claudeAiOauth": {
+                    "accessToken": "old-a", "refreshToken": "old-r", "expiresAt": 1,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x"
+                },
+                "mcpOAuth": { "keep": "me" }
+            }"#,
+        )
+        .unwrap();
+        let cred = Credential {
+            access_token: "new-a".into(),
+            refresh_token: "new-r".into(),
+            expires_at: 99,
+            scopes: vec![], // a refresh response that omitted scopes
+        };
+        merge_credential(&mut root, &cred);
+
+        let o = root.get("claudeAiOauth").unwrap();
+        assert_eq!(o.get("accessToken").unwrap(), "new-a");
+        assert_eq!(o.get("refreshToken").unwrap(), "new-r");
+        assert_eq!(o.get("expiresAt").unwrap(), 99);
+        // Empty scopes must not wipe the blob's existing list.
+        assert_eq!(o.get("scopes").unwrap(), &json!(["user:inference"]));
+        // Plan metadata and sibling top-level keys survive a token rotation.
+        assert_eq!(o.get("subscriptionType").unwrap(), "max");
+        assert_eq!(root.get("mcpOAuth").unwrap().get("keep").unwrap(), "me");
     }
 
     #[test]

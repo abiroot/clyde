@@ -115,18 +115,28 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
-    fn into_credential(self) -> Credential {
+    /// `fallback_scopes` covers responses that omit the `scope` field — storing
+    /// an empty scope list (and later writing it into Claude Code's keychain)
+    /// would make Claude Code see a scopeless session.
+    fn into_credential(self, fallback_scopes: &[String]) -> Credential {
         let expires_at = now_ms() + self.expires_in.unwrap_or(3600) * 1000;
+        let scopes = match self.scope.as_deref() {
+            Some(s) if !s.trim().is_empty() => s.split_whitespace().map(String::from).collect(),
+            _ => fallback_scopes.to_vec(),
+        };
         Credential {
             access_token: self.access_token,
             refresh_token: self.refresh_token,
             expires_at,
-            scopes: self
-                .scope
-                .map(|s| s.split_whitespace().map(String::from).collect())
-                .unwrap_or_default(),
+            scopes,
         }
     }
+}
+
+/// The scope set Clyde requests, as a list — the fallback when a token response
+/// doesn't echo the granted scopes back.
+fn default_scopes() -> Vec<String> {
+    SCOPES.split_whitespace().map(String::from).collect()
 }
 
 /// Exchange the authorization code (the user pastes `code#state`) for tokens.
@@ -165,11 +175,16 @@ pub async fn exchange_code(
     }
 
     let token: TokenResponse = resp.json().await.context("parsing token response")?;
-    Ok(token.into_credential())
+    Ok(token.into_credential(&default_scopes()))
 }
 
-/// Use a refresh token to obtain a fresh access token.
-pub async fn refresh(http: &reqwest::Client, refresh_token: &str) -> Result<Credential> {
+/// Use a refresh token to obtain a fresh access token. `fallback_scopes` is the
+/// credential's current scope list, preserved when the response omits `scope`.
+pub async fn refresh(
+    http: &reqwest::Client,
+    refresh_token: &str,
+    fallback_scopes: &[String],
+) -> Result<Credential> {
     let body = serde_json::json!({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -194,7 +209,12 @@ pub async fn refresh(http: &reqwest::Client, refresh_token: &str) -> Result<Cred
     if token.refresh_token.is_empty() {
         token.refresh_token = refresh_token.to_string();
     }
-    Ok(token.into_credential())
+    let fallback = if fallback_scopes.is_empty() {
+        default_scopes()
+    } else {
+        fallback_scopes.to_vec()
+    };
+    Ok(token.into_credential(&fallback))
 }
 
 fn b64url(bytes: &[u8]) -> String {
@@ -204,6 +224,31 @@ fn b64url(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_response_without_scope_keeps_the_old_scopes() {
+        let resp = TokenResponse {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            expires_in: Some(3600),
+            scope: None,
+        };
+        let old = vec!["user:inference".to_string(), "user:profile".to_string()];
+        let cred = resp.into_credential(&old);
+        assert_eq!(
+            cred.scopes, old,
+            "omitted scope must not wipe the stored scopes"
+        );
+
+        let resp = TokenResponse {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: None,
+            scope: Some("user:inference".into()),
+        };
+        let cred = resp.into_credential(&old);
+        assert_eq!(cred.scopes, vec!["user:inference".to_string()]);
+    }
 
     #[test]
     fn authorize_url_matches_claude_code_shape() {
