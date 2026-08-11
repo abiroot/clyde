@@ -9,7 +9,7 @@ use tauri::State;
 
 use crate::engine::SharedCore;
 use crate::model::{now_ms, Account, AppSnapshot, Credential};
-use crate::{import_claude, oauth};
+use crate::{chrome_link, claude_sync, import_claude, oauth};
 
 /// In-flight PKCE logins, keyed by an opaque flow id, holding the verifier until
 /// the user pastes back their authorization code.
@@ -27,17 +27,42 @@ pub fn get_snapshot(core: State<SharedCore>) -> AppSnapshot {
     core.snapshot()
 }
 
-/// Make `id` the account Claude Code uses, by writing its OAuth into Claude
-/// Code's own credential store. Takes effect on the next `claude` run.
+/// Which account the Claude-in-Chrome extension is signed into. Read on demand
+/// rather than folded into [`AppSnapshot`]: it touches the browser's on-disk
+/// storage, and the answer only matters when the user is looking at it.
 #[tauri::command]
-pub async fn set_active_account(core: State<'_, SharedCore>, id: String) -> CmdResult<AppSnapshot> {
+pub fn get_chrome_link(core: State<SharedCore>) -> chrome_link::ChromeLink {
+    core.chrome_link()
+}
+
+/// What `set_active_account` returns: the fresh snapshot, plus how many
+/// `claude` sessions were running at switch time so the UI can tell the user
+/// what the switch means for them (new credential within ~30 s; a connected
+/// Chrome browser bridge drops and needs `/chrome` → Reconnect, or a restart).
+#[derive(Serialize)]
+pub struct SwitchOutcome {
+    pub snapshot: AppSnapshot,
+    pub running_sessions: u32,
+}
+
+/// Make `id` the account Claude Code uses, by writing its OAuth into Claude
+/// Code's own credential store. New `claude` runs use it immediately; running
+/// sessions pick it up within ~30 seconds.
+#[tauri::command]
+pub async fn set_active_account(
+    core: State<'_, SharedCore>,
+    id: String,
+) -> CmdResult<SwitchOutcome> {
     tracing::info!("set_active_account: {id}");
     core.set_active(&id).await.map_err(|e| {
         tracing::error!("set_active({id}) failed: {e:#}");
         err(e)
     })?;
     tracing::info!("set_active_account: {id} ok");
-    Ok(core.snapshot())
+    Ok(SwitchOutcome {
+        snapshot: core.snapshot(),
+        running_sessions: claude_sync::running_claude_sessions(),
+    })
 }
 
 #[tauri::command]
@@ -227,9 +252,7 @@ async fn account_from_token(
     Account {
         id,
         label,
-        oauth_account: email
-            .as_ref()
-            .map(|e| serde_json::json!({ "emailAddress": e })),
+        oauth_account: profile.as_ref().map(|p| p.merge_into_oauth_account(None)),
         email,
         subscription_type,
         subscription_raw,

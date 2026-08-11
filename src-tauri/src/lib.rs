@@ -1,5 +1,6 @@
 //! Clyde — multi-account switcher for Claude Code.
 
+mod chrome_link;
 mod claude_sync;
 mod commands;
 mod engine;
@@ -44,6 +45,7 @@ pub fn run() {
         .manage(PendingLogins::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
+            commands::get_chrome_link,
             commands::set_active_account,
             commands::rename_account,
             commands::remove_account,

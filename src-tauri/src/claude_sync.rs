@@ -2,10 +2,11 @@
 //! into Claude Code's own credential store — no proxy, no `settings.json` edits.
 //!
 //! Claude Code (default config dir) reads its subscription token from the macOS
-//! Keychain item `Claude Code-credentials`, and shows identity from
-//! `~/.claude/.claude.json` → `oauthAccount`. To switch accounts we rewrite both,
-//! in place, preserving everything else. Plain `claude` then talks straight to
-//! api.anthropic.com as the chosen account — whether or not Clyde is running.
+//! Keychain item `Claude Code-credentials`, and shows identity from its global
+//! config file → `oauthAccount` (see [`claude_json_path`] for which file that
+//! is). To switch accounts we rewrite both, in place, preserving everything
+//! else. Plain `claude` then talks straight to api.anthropic.com as the chosen
+//! account — whether or not Clyde is running.
 //!
 //! Clyde always targets the user's *default* `claude` (the `~/.claude` config
 //! dir / unsuffixed keychain service), regardless of any `CLAUDE_CONFIG_DIR` the
@@ -36,7 +37,28 @@ fn claude_dir() -> Result<PathBuf> {
     Ok(home()?.join(".claude"))
 }
 
+/// The global config file Claude Code actually reads, mirroring its own
+/// resolution order (verified against Claude Code 2.1.227): `~/.claude/.config.json`
+/// when that file exists, otherwise `~/.claude.json`.
+///
+/// Claude Code also honours `CLAUDE_CONFIG_DIR` at this step; Clyde deliberately
+/// does not, for the same reason it pins the unsuffixed keychain service — the
+/// job is to drive the `claude` the *user* runs, not whatever config dir Clyde's
+/// own process happened to inherit. See [`legacy_claude_json_path`] for the file
+/// earlier versions wrote instead.
 fn claude_json_path() -> Result<PathBuf> {
+    let dot_config = claude_dir()?.join(".config.json");
+    if dot_config.exists() {
+        return Ok(dot_config);
+    }
+    Ok(home()?.join(".claude.json"))
+}
+
+/// `~/.claude/.claude.json` — the file Clyde wrote before it mirrored Claude
+/// Code's real resolution order, and still the correct target for anyone whose
+/// `CLAUDE_CONFIG_DIR` is `~/.claude`. Kept in sync whenever it already exists,
+/// so the two files can never disagree about who is logged in.
+fn legacy_claude_json_path() -> Result<PathBuf> {
     Ok(claude_dir()?.join(".claude.json"))
 }
 
@@ -136,6 +158,36 @@ fn write_secret(secret: &str, acct: &str) -> Result<()> {
 }
 
 // ---- public API -----------------------------------------------------------
+
+/// Rewrite the identity block if it doesn't already describe `account`.
+///
+/// The keychain slot is the truth about who is logged in; the config file is
+/// only a label. They drift apart in two ways worth healing: a Clyde old enough
+/// to have written the wrong file left a stale identity behind, and `claude`
+/// itself may have recorded a different account before Clyde took over the slot.
+/// Either way Claude Code goes on comparing that stale `accountUuid` against the
+/// account its live token resolves to — which is what surfaces as "belongs to a
+/// different claude.ai account" on the Chrome bridge.
+///
+/// Returns whether anything was written.
+pub fn repair_identity(account: &Account) -> Result<bool> {
+    let want_uuid = account
+        .oauth_account
+        .as_ref()
+        .and_then(|v| v.get("accountUuid"))
+        .and_then(|v| v.as_str());
+
+    let email_matches = account.email.is_none() || read_active_identity_email() == account.email;
+    let uuid_matches = match want_uuid {
+        Some(want) => read_active_identity_uuid().as_deref() == Some(want),
+        None => true,
+    };
+    if email_matches && uuid_matches {
+        return Ok(false);
+    }
+    update_claude_json(account)?;
+    Ok(true)
+}
 
 /// Make `account` the active Claude Code account: write its OAuth into the
 /// keychain and update `.claude.json`'s identity to match.
@@ -282,17 +334,59 @@ fn merge_credential(root: &mut Map<String, Value>, cred: &Credential) {
     }
 }
 
-/// The email of the identity Claude Code currently displays, from
-/// `~/.claude/.claude.json` → `oauthAccount.emailAddress`. Tokens are opaque,
-/// so this is the only offline way to tell *whose* credential the shared
-/// keychain slot holds.
+/// Count running `claude` processes (exact process name). Used to warn right
+/// after a switch: live sessions adopt the new credential within ~30 s (Claude
+/// Code's keychain reads are cached for 30 s, not "until restart"), and a
+/// session's Claude-in-Chrome browser bridge is account-bound — it drops on the
+/// account change and only recovers via `/chrome` → "Reconnect extension" or a
+/// session restart.
+pub fn running_claude_sessions() -> u32 {
+    let Ok(out) = Command::new("pgrep").args(["-x", "claude"]).output() else {
+        return 0;
+    };
+    if !out.status.success() {
+        return 0; // no matches (exit 1) or pgrep unavailable
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count() as u32
+}
+
+/// The email of the identity Claude Code currently displays, from its global
+/// config → `oauthAccount.emailAddress`. Tokens are opaque, so this is the only
+/// offline way to tell *whose* credential the shared keychain slot holds.
+///
+/// Falls back to the legacy path so an upgrade doesn't briefly lose track of the
+/// active identity before the next switch rewrites the real file.
 pub fn read_active_identity_email() -> Option<String> {
-    let path = claude_json_path().ok()?;
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    v.get("oauthAccount")?
-        .get("emailAddress")?
-        .as_str()
-        .map(str::to_string)
+    identity_field("emailAddress")
+}
+
+/// The `accountUuid` Claude Code has on file for the active identity — the same
+/// value the Chrome extension keys its bridge connection on.
+pub fn read_active_identity_uuid() -> Option<String> {
+    identity_field("accountUuid")
+}
+
+fn identity_field(key: &str) -> Option<String> {
+    let paths = [claude_json_path().ok(), legacy_claude_json_path().ok()];
+    for path in paths.into_iter().flatten() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if let Some(found) = v
+            .get("oauthAccount")
+            .and_then(|o| o.get(key))
+            .and_then(|x| x.as_str())
+        {
+            return Some(found.to_string());
+        }
+    }
+    None
 }
 
 /// One-time self-heal: strip a stale proxy integration left in `settings.json`
@@ -349,15 +443,28 @@ fn cleanup_legacy_at(path: &Path, backup: &Path) -> Result<bool> {
 // ---- .claude.json ---------------------------------------------------------
 
 fn update_claude_json(account: &Account) -> Result<()> {
-    let path = claude_json_path()?;
+    write_identity(&claude_json_path()?, account)?;
+    // Only ever *update* the legacy file — never create one, or we'd resurrect
+    // the very split-brain this fix removes.
+    let legacy = legacy_claude_json_path()?;
+    if legacy.exists() && Some(&legacy) != claude_json_path().ok().as_ref() {
+        write_identity(&legacy, account)?;
+    }
+    Ok(())
+}
+
+fn write_identity(path: &Path, account: &Account) -> Result<()> {
     let mut root: Map<String, Value> = if path.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&path).context("reading .claude.json")?)
+        serde_json::from_str(&std::fs::read_to_string(path).context("reading .claude.json")?)
             .unwrap_or_default()
     } else {
         Map::new()
     };
 
     let oauth_account = if let Some(meta) = &account.oauth_account {
+        // Replace wholesale rather than merge: the fields we'd leave behind
+        // (organizationName, seatTier, …) describe the *outgoing* account, and
+        // showing another account's org is worse than showing none.
         meta.clone()
     } else {
         // No captured identity: patch the email onto whatever's there.
@@ -372,20 +479,20 @@ fn update_claude_json(account: &Account) -> Result<()> {
     };
     root.insert("oauthAccount".into(), oauth_account);
 
-    std::fs::write(&path, serde_json::to_string_pretty(&Value::Object(root))?)
+    std::fs::write(path, serde_json::to_string_pretty(&Value::Object(root))?)
         .context("writing .claude.json")?;
-    set_private(&path);
+    set_private(path);
     Ok(())
 }
 
 #[cfg(unix)]
-fn set_private(path: &PathBuf) {
+fn set_private(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
 #[cfg(not(unix))]
-fn set_private(_path: &PathBuf) {}
+fn set_private(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {

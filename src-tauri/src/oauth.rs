@@ -295,6 +295,42 @@ pub struct Profile {
     pub subscription_raw: Option<String>,
     /// e.g. `"default_claude_max_20x"`.
     pub rate_limit_tier: Option<String>,
+    /// Stable account identifier. Claude Code keys several things on this —
+    /// including which room it joins on the Claude-in-Chrome bridge — and the
+    /// Chrome extension stores the same value, so it is what lets Clyde tell
+    /// whether the browser is on the account that is currently active.
+    pub account_uuid: Option<String>,
+    /// The account's organization, stored alongside `account_uuid` in
+    /// `oauthAccount` so Claude Code's own identity block stays complete.
+    pub organization_uuid: Option<String>,
+}
+
+impl Profile {
+    /// The `oauthAccount` identity block Claude Code keeps in its global config,
+    /// layered onto whatever is already stored for this account so a rich block
+    /// imported from a real Claude Code config keeps its extra fields.
+    ///
+    /// `accountUuid` matters beyond display: Claude Code compares it against the
+    /// account its live token resolves to, and a stale one is what produces the
+    /// "belongs to a different claude.ai account" error on the Chrome bridge.
+    pub fn merge_into_oauth_account(
+        &self,
+        existing: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut obj = existing
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        let mut set = |key: &str, value: &Option<String>| {
+            if let Some(v) = value {
+                obj.insert(key.into(), serde_json::json!(v));
+            }
+        };
+        set("emailAddress", &self.email);
+        set("accountUuid", &self.account_uuid);
+        set("organizationUuid", &self.organization_uuid);
+        set("displayName", &self.full_name);
+        serde_json::Value::Object(obj)
+    }
 }
 
 /// Look up an account's identity from its access token. Best-effort: any network
@@ -338,5 +374,7 @@ pub async fn fetch_profile(http: &reqwest::Client, access_token: &str) -> Result
         full_name: str_at(account, "full_name").or_else(|| str_at(account, "display_name")),
         subscription_raw,
         rate_limit_tier: str_at(org, "rate_limit_tier"),
+        account_uuid: str_at(account, "uuid"),
+        organization_uuid: str_at(org, "uuid"),
     })
 }

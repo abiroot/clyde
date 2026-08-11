@@ -58,9 +58,19 @@ account, Clyde rewrites those two things, in place, with the chosen account's OA
 ```
 
 Because Clyde supplies the real credential to Claude Code's own store, a single
-config dir can drive any number of accounts. Note: Claude Code caches its token in
-memory at startup, so a switch takes effect on the **next `claude` run** rather than
-instantly mid-session.
+config dir can drive any number of accounts. A switch applies to new `claude`
+runs immediately, and running sessions follow within ~30 seconds (Claude Code
+re-reads the keychain on a short cache). Clyde tells you when a switch happened
+while sessions were running.
+
+**Chrome is the exception.** Claude Code and the Claude-in-Chrome extension find
+each other through a rendezvous keyed on account, so `/chrome` only works while
+the browser is signed into the *same* claude.ai account that's active. Switching
+leaves the browser behind, and Clyde can't move it — the extension holds its
+tokens in memory and only accepts a sign-in from a claude.ai page. Instead Clyde
+detects it and says which account Chrome is on; when that's an account Clyde
+already manages, one click switches to it and browser tools work again without
+touching Chrome at all.
 
 > Full design notes in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -94,7 +104,9 @@ npm run tauri build    # produce a .app / installer
 2. **Pick the active account** — one click makes it the account Claude Code uses.
    Clyde writes it into Claude Code's own credential store; nothing else to wire up.
 3. **Use `claude` as normal.** Watch the gauges and switch whenever an account is
-   running hot. (A switch applies to your next `claude` run.)
+   running hot. (New `claude` runs switch immediately; running sessions follow
+   within ~30 seconds. If you use `/chrome`, keep the browser signed into the
+   same account — Clyde flags it when they drift apart.)
 
 ## Security
 

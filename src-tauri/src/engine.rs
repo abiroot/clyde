@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use tauri::{AppHandle, Emitter};
 
 use crate::model::*;
-use crate::{claude_sync, import_claude, oauth, vault};
+use crate::{chrome_link, claude_sync, import_claude, oauth, vault};
 
 /// Refresh an access token this many ms before it actually expires.
 const REFRESH_SKEW_MS: i64 = 60_000;
@@ -191,6 +191,39 @@ impl Core {
         Ok(())
     }
 
+    /// Which account the Claude-in-Chrome extension is signed into, and whether
+    /// that is the account currently active. Switching in Clyde leaves the
+    /// browser where it was, so `/chrome` stops working until the two agree —
+    /// see [`crate::chrome_link`] for why Clyde can only report this, not fix it
+    /// silently.
+    pub fn chrome_link(&self) -> chrome_link::ChromeLink {
+        let (known, active_uuid) = {
+            let s = self.state.read().unwrap();
+            let uuid_of = |a: &Account| {
+                a.oauth_account
+                    .as_ref()
+                    .and_then(|v| v.get("accountUuid"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            };
+            let known: Vec<(String, String, Option<String>)> = s
+                .accounts
+                .iter()
+                .filter_map(|a| Some((uuid_of(a)?, a.id.clone(), a.email.clone())))
+                .collect();
+            let active_uuid = s
+                .active_id
+                .as_ref()
+                .and_then(|id| s.accounts.iter().find(|a| &a.id == id))
+                .and_then(uuid_of)
+                // Before the backfill has run, fall back to whatever Claude
+                // Code itself recorded for the active identity.
+                .or_else(claude_sync::read_active_identity_uuid);
+            (known, active_uuid)
+        };
+        chrome_link::detect(&known, active_uuid.as_deref())
+    }
+
     /// Reconcile Claude Code's shared keychain slot with our vault, in both
     /// directions. Works out which stored account the slot's credential belongs
     /// to (token lineage first, then the identity in `~/.claude/.claude.json`)
@@ -261,7 +294,30 @@ impl Core {
             let mut s = self.state.write().unwrap();
             s.active_id = resolved;
         }
+        self.repair_active_identity();
         self.emit();
+    }
+
+    /// Heal a stale identity block in Claude Code's config, so it names whoever
+    /// actually owns the keychain slot. Cheap and idempotent — a read, and a
+    /// write only when the two disagree.
+    fn repair_active_identity(&self) {
+        let active = {
+            let s = self.state.read().unwrap();
+            s.active_id
+                .as_ref()
+                .and_then(|id| s.accounts.iter().find(|a| &a.id == id))
+                .cloned()
+        };
+        let Some(account) = active else { return };
+        match claude_sync::repair_identity(&account) {
+            Ok(true) => tracing::info!(
+                "refreshed Claude Code's identity block for {}",
+                account.email.as_deref().unwrap_or(&account.id)
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't refresh the identity block: {e:#}"),
+        }
     }
 
     /// On startup, sync all accounts' credentials from their source config dirs.
@@ -421,9 +477,62 @@ impl Core {
             s.accounts.iter().map(|a| a.id.clone()).collect()
         };
         for id in ids {
+            self.backfill_identity(&id).await;
             if let Err(e) = self.fetch_account_usage(&id).await {
                 tracing::debug!("usage fetch failed for {id}: {e:#}");
             }
+        }
+
+        // The backfill may have just learned the active account's uuid, which
+        // startup didn't have to write into Claude Code's config.
+        self.repair_active_identity();
+    }
+
+    /// Fill in `oauthAccount.accountUuid` for accounts stored before Clyde
+    /// captured it (imports and token pastes only ever synthesized an email).
+    /// One profile lookup per account, once — after which this is a no-op.
+    ///
+    /// The uuid is what Claude Code writes into its own config and what the
+    /// Chrome extension keys its bridge connection on, so without it Clyde can
+    /// neither restore a complete identity nor tell which account the browser is
+    /// signed into.
+    async fn backfill_identity(&self, account_id: &str) {
+        let existing = {
+            let s = self.state.read().unwrap();
+            let Some(a) = s.accounts.iter().find(|a| a.id == account_id) else {
+                return;
+            };
+            let has_uuid = a
+                .oauth_account
+                .as_ref()
+                .and_then(|v| v.get("accountUuid"))
+                .is_some();
+            if has_uuid {
+                return;
+            }
+            a.oauth_account.clone()
+        };
+
+        let Ok(bearer) = self.valid_bearer(account_id).await else {
+            return;
+        };
+        let profile = match oauth::fetch_profile(&self.http, &bearer).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("identity backfill failed for {account_id}: {e:#}");
+                return;
+            }
+        };
+        if profile.account_uuid.is_none() {
+            return;
+        }
+        let merged = profile.merge_into_oauth_account(existing.as_ref());
+
+        let mut s = self.state.write().unwrap();
+        if let Some(a) = s.accounts.iter_mut().find(|a| a.id == account_id) {
+            a.oauth_account = Some(merged);
+            let _ = vault::save_accounts(&s.accounts);
+            tracing::info!("cached accountUuid for {account_id}");
         }
     }
 

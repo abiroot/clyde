@@ -1,8 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSnapshot, Discovered, LoginStart } from "./types";
+import type {
+  AppSnapshot,
+  ChromeLink,
+  Discovered,
+  LoginStart,
+  SwitchOutcome,
+} from "./types";
 
 export const api = {
   getSnapshot: () => invoke<AppSnapshot>("get_snapshot"),
+
+  getChromeLink: () => invoke<ChromeLink>("get_chrome_link"),
 
   discoverClaudeAccounts: () =>
     invoke<Discovered[]>("discover_claude_accounts"),
@@ -13,7 +21,7 @@ export const api = {
   startClaudeLogin: () => invoke<string>("start_claude_login"),
 
   setActiveAccount: (id: string) =>
-    invoke<AppSnapshot>("set_active_account", { id }),
+    invoke<SwitchOutcome>("set_active_account", { id }),
 
   renameAccount: (id: string, label: string) =>
     invoke<AppSnapshot>("rename_account", { id, label }),

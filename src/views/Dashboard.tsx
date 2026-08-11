@@ -42,9 +42,10 @@ export function Dashboard(props: Props) {
       </div>
 
       <p className="px-1 pt-0.5 text-[11px] leading-relaxed text-[var(--color-ink-faint)]">
-        Switching rewrites Claude Code's login in place. A running session keeps
-        its old account until it exits — to pick up the new one without losing
-        context, start <code>claude -c</code> (continue) in your terminal.
+        Switching rewrites Claude Code's login in place. New <code>claude</code>{" "}
+        runs use it immediately; running sessions follow within ~30 seconds.{" "}
+        <code>/chrome</code> is the exception: it pairs per account, so browser
+        tools only work while Chrome is signed into the active account.
       </p>
     </div>
   );

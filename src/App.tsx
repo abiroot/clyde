@@ -5,12 +5,14 @@ import type { AppSnapshot } from "./lib/types";
 import { Dashboard } from "./views/Dashboard";
 import { Onboarding } from "./views/Onboarding";
 import { AddAccountDialog } from "./components/AddAccountDialog";
+import { ChromeChip } from "./components/ChromeChip";
 
 export default function App() {
   const { snapshot, setSnapshot } = useSnapshot();
   const [showAdd, setShowAdd] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   if (!snapshot) return <Splash />;
 
@@ -19,8 +21,20 @@ export default function App() {
   const activate = async (id: string) => {
     setBusyId(id);
     setError(null);
+    setNotice(null);
     try {
-      setSnapshot(await api.setActiveAccount(id));
+      const { snapshot, running_sessions } = await api.setActiveAccount(id);
+      setSnapshot(snapshot);
+      if (running_sessions > 0) {
+        const n = running_sessions;
+        setNotice(
+          `${n} running claude session${n === 1 ? "" : "s"} will switch to ` +
+            `this account within ~30 seconds. A session using Chrome browser ` +
+            `tools loses that connection when its account changes — restart ` +
+            `claude to re-pair, and note that /chrome only reconnects once ` +
+            `Chrome is signed into this same account.`,
+        );
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -43,6 +57,26 @@ export default function App() {
               Dismiss
             </button>
           </div>
+        )}
+
+        {notice && (
+          <div className="mx-4 mt-1 mb-2 flex items-start justify-between gap-2 rounded-lg border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-3 py-2 text-[11px] text-[var(--color-warn)]">
+            <span className="leading-snug">{notice}</span>
+            <button
+              onClick={() => setNotice(null)}
+              className="shrink-0 font-medium hover:opacity-70"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {snapshot.accounts.length > 0 && (
+          <ChromeChip
+            snapshot={snapshot}
+            onActivate={activate}
+            busyId={busyId}
+          />
         )}
 
         {snapshot.accounts.length === 0 ? (
