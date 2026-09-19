@@ -9,6 +9,7 @@ import {
   Check,
   RefreshCw,
   Globe,
+  Copy,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../lib/api";
@@ -212,18 +213,32 @@ function BrowserTab({ busy, setBusy, setError, onDone }: TabProps) {
   const [flow, setFlow] = useState<{ flowId: string; url: string } | null>(null);
   const [label, setLabel] = useState("");
   const [code, setCode] = useState("");
+  const [copied, setCopied] = useState(false);
 
-  const start = async () => {
+  /** `open`: launch the default browser. Otherwise just produce the link, for
+   *  pasting into a different browser or profile. */
+  const start = async (open: boolean) => {
     setError(null);
     setBusy(true);
     try {
       const { flow_id, authorize_url } = await api.beginLogin();
       setFlow({ flowId: flow_id, url: authorize_url });
-      await openUrl(authorize_url);
+      if (open) await openUrl(authorize_url);
+      else await copy(authorize_url);
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const copy = async (url: string) => {
+    try {
+      await api.copyText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Couldn't copy automatically — select the link and press ⌘C.");
     }
   };
 
@@ -244,17 +259,29 @@ function BrowserTab({ busy, setBusy, setError, onDone }: TabProps) {
     return (
       <>
         <p className="text-xs leading-relaxed text-[var(--color-ink-soft)]">
-          Sign in to any Claude account in your browser — no terminal needed. Clyde
+          Sign in to one of your Claude accounts in a browser — no terminal needed. Clyde
           reads its email and plan automatically once you paste the code back.
         </p>
         <button
           disabled={busy}
-          onClick={start}
+          onClick={() => start(true)}
           className="flex items-center justify-center gap-2 rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-50"
         >
           <Globe size={15} />
-          {busy ? "Opening browser…" : "Sign in with browser"}
+          {busy ? "Opening browser…" : "Open in browser"}
         </button>
+        <button
+          disabled={busy}
+          onClick={() => start(false)}
+          className="flex items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-surface-2)] disabled:opacity-50"
+        >
+          <Copy size={14} />
+          Copy sign-in link
+        </button>
+        <p className="text-[11px] leading-relaxed text-[var(--color-ink-faint)]">
+          Copy the link to open it in a different browser or profile — the one already
+          signed into the account you want to add.
+        </p>
       </>
     );
   }
@@ -263,11 +290,28 @@ function BrowserTab({ busy, setBusy, setError, onDone }: TabProps) {
     <>
       <div className="rounded-xl border border-[var(--color-border-soft)] p-3">
         <ol className="flex flex-col gap-1.5 text-xs text-[var(--color-ink-soft)]">
-          <li>1. A browser opened — sign in to the account you want to add.</li>
+          <li>1. Open the sign-in link in the browser signed into the account you want to add.</li>
           <li>2. Anthropic shows an authorization code. Copy it.</li>
           <li>3. Paste it below and finish.</li>
         </ol>
       </div>
+      <Field label="Sign-in link">
+        <div className="flex gap-2">
+          <input
+            readOnly
+            value={flow.url}
+            onFocus={(e) => e.currentTarget.select()}
+            className="min-w-0 flex-1 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 font-mono text-[11px] text-[var(--color-ink-soft)] outline-none"
+          />
+          <button
+            onClick={() => copy(flow.url)}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 text-xs font-medium hover:bg-[var(--color-surface-2)]"
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      </Field>
       <Field label="Account name (optional)">
         <input
           value={label}
@@ -297,7 +341,7 @@ function BrowserTab({ busy, setBusy, setError, onDone }: TabProps) {
         onClick={() => openUrl(flow.url)}
         className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink-soft)]"
       >
-        Reopen browser
+        Open in default browser
       </button>
     </>
   );

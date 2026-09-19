@@ -69,6 +69,7 @@ pub fn run() {
             open_main_window,
             quit_app,
             js_log,
+            commands::copy_text,
             commands::get_settings,
             commands::set_settings,
             commands::get_history,

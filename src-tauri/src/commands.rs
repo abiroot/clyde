@@ -75,6 +75,25 @@ pub fn open_chrome_extensions_page() -> CmdResult<()> {
     open_chrome::open_extensions_page().map_err(err)
 }
 
+/// Put text on the macOS clipboard. `pbcopy` is dependable where the webview's
+/// own clipboard API may be unavailable.
+#[tauri::command]
+pub fn copy_text(text: String) -> CmdResult<()> {
+    use std::io::Write;
+    let mut child = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(err)?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(text.as_bytes())
+        .map_err(err)?;
+    child.wait().map_err(err)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_settings(core: State<SharedCore>) -> crate::settings::Settings {
     core.settings()

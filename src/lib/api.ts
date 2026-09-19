@@ -18,6 +18,8 @@ export const api = {
 
   getOpenChrome: () => invoke<OpenChromeStatus>("get_open_chrome"),
 
+  copyText: (text: string) => invoke<void>("copy_text", { text }),
+
   getSettings: () => invoke<Settings>("get_settings"),
 
   setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
