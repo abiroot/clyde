@@ -14,7 +14,6 @@ import {
   loginBroken,
   shortReset,
   tightest,
-  toneColor,
 } from "../ui/kit";
 
 interface Props {
@@ -57,10 +56,11 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
   const rename = async (id: string, label: string) => setSnapshot(await api.renameAccount(id, label));
   const remove = async (id: string) => setSnapshot(await api.removeAccount(id));
 
-  // Best place to switch to: the other account with the most headroom.
-  const best = others
-    .filter((a) => a.usage.status !== "rejected" && !a.usage_error && tightest(a) != null)
-    .sort((a, b) => (tightest(a) ?? 100) - (tightest(b) ?? 100))[0];
+  // Most headroom first; limited accounts, then ones we can't read, last.
+  const rank = (a: AccountView) =>
+    a.usage_error ? 300 : a.usage.status === "rejected" ? 200 + (tightest(a) ?? 0) : (tightest(a) ?? 150);
+  const ranked = [...others].sort((a, b) => rank(a) - rank(b));
+  const best = ranked.find((a) => !a.usage_error && a.usage.status !== "rejected" && tightest(a) != null);
 
   return (
     <div className="flex max-w-[640px] flex-col gap-6">
@@ -118,34 +118,49 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
       )}
 
       {others.length > 0 && (
-        <Group
-          title="Other accounts"
-          footer={
-            best
-              ? `${best.label} has the most headroom right now (${Math.round(tightest(best) ?? 0)}% on its tightest limit).`
-              : undefined
-          }
-        >
-          {others.map((a) => (
-            <GroupRow key={a.id} className="group">
-              <AccountHeader account={a} onRename={rename} onRemove={remove} />
-              {!a.usage_error && a.usage.status !== "rejected" && tightest(a) != null && (
-                <span className="text-[12px] tabular-nums" style={{ color: toneColor(tightest(a)) }}>
-                  {Math.round(tightest(a)!)}%
-                </span>
-              )}
-              {loginBroken(a) ? (
-                <button className="n-plain-button" onClick={onAdd} title="Its saved login stopped working">
-                  Sign in again…
-                </button>
-              ) : (
-                <button className="n-plain-button" disabled={busyId !== null} onClick={() => switchTo(a.id)}>
-                  {busyId === a.id ? "Switching…" : "Use"}
-                </button>
-              )}
-            </GroupRow>
-          ))}
-        </Group>
+        <section className="flex flex-col gap-1.5">
+          <h3 className="px-1 text-[12px] font-semibold text-[var(--n-text-2)]">
+            Other accounts · most headroom first
+          </h3>
+          <div className="flex flex-col gap-2.5">
+            {ranked.map((a) => (
+              <div key={a.id} className="n-group flex flex-col gap-3 p-3.5">
+                <div className="flex items-center gap-2">
+                  <AccountHeader account={a} onRename={rename} onRemove={remove} />
+                  {a.id === best?.id && (
+                    <span
+                      className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium"
+                      style={{ color: "var(--n-ok)", background: "color-mix(in srgb, var(--n-ok) 14%, transparent)" }}
+                    >
+                      Most headroom
+                    </span>
+                  )}
+                  {loginBroken(a) ? (
+                    <button className="n-plain-button" onClick={onAdd} title="Its saved login stopped working">
+                      Sign in again…
+                    </button>
+                  ) : (
+                    <button className="n-plain-button" disabled={busyId !== null} onClick={() => switchTo(a.id)}>
+                      {busyId === a.id ? "Switching…" : "Use"}
+                    </button>
+                  )}
+                </div>
+                {!a.usage_error && a.usage.updated_at > 0 && (
+                  <>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      {limitRows(a).map((r) => (
+                        <LimitRow key={r.label} {...r} />
+                      ))}
+                    </div>
+                    <p className="n-dim text-[11px]">
+                      {a.subscription_type ? `${a.subscription_type} · ` : ""}updated {ago(a.usage.updated_at)}
+                    </p>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       <Group>
@@ -232,8 +247,10 @@ function AccountHeader({
                 .filter(Boolean)
                 .join(" · ")}
             </span>
-          ) : (
+          ) : account.usage_error || account.usage.status === "rejected" || !account.usage.updated_at ? (
             <AccountSummary account={account} />
+          ) : (
+            <span className="n-dim">Tightest limit {Math.round(tightest(account) ?? 0)}%</span>
           )}
         </div>
       </div>

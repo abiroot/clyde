@@ -5,6 +5,8 @@ export interface UsageSnapshot {
   seven_day_utilization: number | null;
   status: string | null;
   resets_at: number | null;
+  five_hour_resets_at: number | null;
+  seven_day_resets_at: number | null;
   updated_at: number;
   /** Per-model / per-product caps, e.g. "7-day · Fable". */
   scoped_limits: UsageLimit[];

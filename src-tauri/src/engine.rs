@@ -172,6 +172,9 @@ impl Core {
     pub fn add_account(&self, account: Account) -> Result<()> {
         {
             let mut s = self.state.write().unwrap();
+            // A re-added account has a fresh login: whatever went wrong with the
+            // old one (e.g. "Couldn't refresh the login") no longer applies.
+            s.usage_errors.remove(&account.id);
             if let Some(existing) = s.accounts.iter_mut().find(|a| a.id == account.id) {
                 *existing = account;
             } else {
@@ -191,6 +194,7 @@ impl Core {
             let mut s = self.state.write().unwrap();
             s.accounts.retain(|a| a.id != id);
             s.usage.remove(id);
+            s.usage_errors.remove(id);
             if s.active_id.as_deref() == Some(id) {
                 s.active_id = s.accounts.first().map(|a| a.id.clone());
             }

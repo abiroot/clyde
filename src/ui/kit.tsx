@@ -22,8 +22,8 @@ export function limitRows(a: AccountView): LimitRowData[] {
   const u = a.usage;
   const fc = (label: string) => a.forecasts?.find((f) => f.label === label) ?? null;
   return [
-    { label: "Session", percent: u.five_hour_utilization, resetsAt: null, forecast: fc("Session") },
-    { label: "Week", percent: u.seven_day_utilization, resetsAt: null, forecast: fc("Week") },
+    { label: "Session", percent: u.five_hour_utilization, resetsAt: u.five_hour_resets_at ?? null, forecast: fc("Session") },
+    { label: "Week", percent: u.seven_day_utilization, resetsAt: u.seven_day_resets_at ?? null, forecast: fc("Week") },
     ...(u.scoped_limits ?? []).map((l) => ({
       label: scopedLabel(l.label),
       percent: l.percent,

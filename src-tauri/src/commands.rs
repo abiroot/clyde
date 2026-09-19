@@ -241,6 +241,8 @@ pub async fn complete_login(
 
     let account = account_from_token(&core.http, credential, &label).await;
     core.add_account(account).map_err(err)?;
+    // Read its usage now rather than at the next 2-minute poll.
+    spawn_usage_poll(core.inner().clone());
     Ok(core.snapshot())
 }
 
@@ -272,6 +274,7 @@ pub async fn import_token(
     };
     let account = account_from_token(&core.http, credential, &label).await;
     core.add_account(account).map_err(err)?;
+    spawn_usage_poll(core.inner().clone());
     Ok(core.snapshot())
 }
 

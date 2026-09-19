@@ -73,6 +73,8 @@ pub fn parse(body: &Value) -> Option<UsageSnapshot> {
         seven_day_utilization,
         status,
         resets_at,
+        five_hour_resets_at: five_hour.as_ref().and_then(|w| w.resets_at),
+        seven_day_resets_at: seven_day.as_ref().and_then(|w| w.resets_at),
         updated_at: now_ms(),
         scoped_limits: scoped_limits(body),
     })
@@ -173,6 +175,8 @@ mod tests {
         assert_eq!(snap.status.as_deref(), Some("allowed"));
         // Soonest reset is the 5-hour window (2026-06-10T18:50:00Z).
         assert_eq!(snap.resets_at, Some(1_781_117_400));
+        assert_eq!(snap.five_hour_resets_at, Some(1_781_117_400));
+        assert!(snap.seven_day_resets_at > snap.five_hour_resets_at);
     }
 
     #[test]

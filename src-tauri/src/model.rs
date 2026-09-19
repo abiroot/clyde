@@ -78,6 +78,12 @@ pub struct UsageSnapshot {
     pub status: Option<String>,
     /// Unix epoch seconds when the most-constrained window resets.
     pub resets_at: Option<i64>,
+    /// When the 5-hour window resets (unix seconds).
+    #[serde(default)]
+    pub five_hour_resets_at: Option<i64>,
+    /// When the 7-day window resets (unix seconds).
+    #[serde(default)]
+    pub seven_day_resets_at: Option<i64>,
     /// Unix epoch milliseconds of the last update.
     pub updated_at: i64,
     /// Limits beyond the plain 5-hour / 7-day pair — per-model weekly caps
