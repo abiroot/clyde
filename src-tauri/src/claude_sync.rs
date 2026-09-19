@@ -70,19 +70,53 @@ fn settings_path() -> Result<PathBuf> {
 
 /// Read the raw `Claude Code-credentials` secret, if present.
 fn read_secret() -> Option<String> {
+    read_secret_strict().ok().flatten()
+}
+
+/// `security`'s exit status for errSecItemNotFound.
+const SECURITY_ITEM_NOT_FOUND: i32 = 44;
+
+/// Like [`read_secret`], but tells "no item yet" (`Ok(None)`) apart from "the
+/// item exists and couldn't be read" (`Err`) — a locked keychain, a denied
+/// prompt. Read-modify-write callers must not treat the second as empty.
+fn read_secret_strict() -> Result<Option<String>> {
+    read_secret_from(SERVICE)
+}
+
+fn read_secret_from(service: &str) -> Result<Option<String>> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", SERVICE, "-w"])
+        .args(["find-generic-password", "-s", service, "-w"])
         .output()
-        .ok()?;
+        .context("running `security find-generic-password`")?;
+    if out.status.code() == Some(SECURITY_ITEM_NOT_FOUND) {
+        return Ok(None);
+    }
     if !out.status.success() {
-        return None;
+        return Err(anyhow!(
+            "couldn't read the Claude Code keychain item: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
+    let s = String::from_utf8(out.stdout)
+        .context("keychain item isn't UTF-8")?
+        .trim()
+        .to_string();
+    Ok((!s.is_empty()).then(|| decode_if_hex(s)))
+}
+
+/// `security -w` prints a password that isn't plain ASCII (e.g. an org name
+/// with an accent) as bare hex. A JSON blob never starts with a hex digit, so
+/// all-hex output is that encoding — decode it back.
+fn decode_if_hex(s: String) -> String {
+    let is_hex = s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_hex {
+        return s;
     }
+    let bytes: Option<Vec<u8>> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect();
+    bytes.and_then(|b| String::from_utf8(b).ok()).unwrap_or(s)
 }
 
 /// Read the `acct` attribute of the existing item so an in-place update matches
@@ -116,38 +150,83 @@ fn read_account_attr() -> String {
 
 /// Write the secret back into the existing item in place. `-U` updates rather
 /// than duplicates, preserving the item's existing access-control list so plain
-/// `claude` keeps reading it without a prompt. The command goes through
-/// `security -i` (stdin) so the OAuth secret never appears in the process
-/// argument list, where any local process could read it via `ps`.
+/// `claude` keeps reading it without a prompt.
+///
+/// Mirrors Claude Code's own writer (2.1.278): the secret goes hex-encoded
+/// (`-X`) through `security -i` so it stays out of the process argument list —
+/// unless the command line is too long for `security -i`, in which case it falls
+/// back to argv exactly as Claude Code does. The limit is real and silent:
+/// `security -i` stores the truncated head of an over-long line as the password
+/// and only then fails, and `mcpOAuth` alone pushes this item past it.
 fn write_secret(secret: &str, acct: &str) -> Result<()> {
-    use std::io::Write;
-    use std::process::Stdio;
+    write_secret_to(SERVICE, secret, acct)
+}
+
+/// Longest `security -i` line that is stored intact, with margin. Measured on
+/// macOS 15: a 4,200-byte line kept 4,038 bytes of password, then exited 1.
+const SECURITY_STDIN_LINE_MAX: usize = 4000;
+
+/// How [`write_secret_to`] hands the secret to `security`.
+#[derive(Debug, PartialEq)]
+enum SecretWrite {
+    /// One `security -i` line (keeps the secret out of `ps`).
+    Stdin(String),
+    /// Plain argv — only when the stdin line would be truncated.
+    Argv(Vec<String>),
+}
+
+fn secret_write_command(service: &str, secret: &str, acct: &str) -> SecretWrite {
+    let hex: String = secret.bytes().map(|b| format!("{b:02x}")).collect();
 
     // security(1)'s stdin parser supports double-quoted words with backslash
-    // escapes; serde-serialized JSON contains no raw newlines.
+    // escapes; the hex payload itself needs none.
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let mut line = format!("add-generic-password -U -s \"{}\"", esc(SERVICE));
+    let mut line = format!("add-generic-password -U -s \"{}\"", esc(service));
     if !acct.is_empty() {
         line.push_str(&format!(" -a \"{}\"", esc(acct)));
     }
-    line.push_str(&format!(" -w \"{}\"\n", esc(secret)));
+    line.push_str(&format!(" -X \"{hex}\"\n"));
+    if line.len() <= SECURITY_STDIN_LINE_MAX {
+        return SecretWrite::Stdin(line);
+    }
 
-    let mut child = Command::new("security")
-        .arg("-i")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("running `security -i`")?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("no stdin handle for `security -i`"))?
-        .write_all(line.as_bytes())
-        .context("writing to `security -i`")?;
-    let out = child
-        .wait_with_output()
-        .context("waiting for `security -i`")?;
+    let mut args: Vec<String> = vec!["add-generic-password".into(), "-U".into()];
+    args.extend(["-s".into(), service.into()]);
+    if !acct.is_empty() {
+        args.extend(["-a".into(), acct.into()]);
+    }
+    args.extend(["-X".into(), hex]);
+    SecretWrite::Argv(args)
+}
+
+fn write_secret_to(service: &str, secret: &str, acct: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let out = match secret_write_command(service, secret, acct) {
+        SecretWrite::Stdin(line) => {
+            let mut child = Command::new("security")
+                .arg("-i")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("running `security -i`")?;
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("no stdin handle for `security -i`"))?
+                .write_all(line.as_bytes())
+                .context("writing to `security -i`")?;
+            child
+                .wait_with_output()
+                .context("waiting for `security -i`")?
+        }
+        SecretWrite::Argv(args) => Command::new("security")
+            .args(&args)
+            .output()
+            .context("running `security add-generic-password`")?,
+    };
     if !out.status.success() {
         return Err(anyhow!(
             "security add-generic-password failed: {}",
@@ -193,9 +272,20 @@ pub fn repair_identity(account: &Account) -> Result<bool> {
 /// keychain and update `.claude.json`'s identity to match.
 pub fn activate(account: &Account) -> Result<()> {
     // Preserve any other top-level keys already in the blob (e.g. `mcpOAuth`).
-    let mut root: Map<String, Value> = read_secret()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // A read failure (locked keychain, denied prompt) aborts: starting empty
+    // would erase every MCP server's login. Keychain reads are never torn, so an
+    // unparsable item is already corrupt — e.g. truncated by an old Clyde — and
+    // `claude` can't use it either; overwriting it is the repair.
+    let mut root: Map<String, Value> = match read_secret_strict()? {
+        None => Map::new(),
+        Some(s) => match serde_json::from_str(&s) {
+            Ok(Value::Object(m)) => m,
+            _ => {
+                tracing::warn!("Claude Code's keychain item was corrupt; rewriting it");
+                Map::new()
+            }
+        },
+    };
 
     // Plan metadata from the *outgoing* blob, used only as a fallback when the
     // incoming account didn't capture its own (e.g. added via token paste).
@@ -434,7 +524,7 @@ fn cleanup_legacy_at(path: &Path, backup: &Path) -> Result<bool> {
     }
 
     if changed {
-        std::fs::write(path, serde_json::to_string_pretty(&Value::Object(root))?)?;
+        write_json_atomic(path, &root)?;
         let _ = std::fs::remove_file(backup);
     }
     Ok(changed)
@@ -453,14 +543,9 @@ pub fn read_global_config() -> Option<Value> {
 /// else — same file resolution and legacy mirroring as the identity write.
 pub fn set_global_flag(key: &str, value: bool) -> Result<()> {
     let set = |path: &Path| -> Result<()> {
-        let mut root: Map<String, Value> =
-            serde_json::from_str(&std::fs::read_to_string(path).context("reading .claude.json")?)
-                .context("parsing .claude.json")?;
+        let mut root = read_json_object(path)?;
         root.insert(key.into(), json!(value));
-        std::fs::write(path, serde_json::to_string_pretty(&Value::Object(root))?)
-            .context("writing .claude.json")?;
-        set_private(path);
-        Ok(())
+        write_json_atomic(path, &root)
     };
     let main = claude_json_path()?;
     set(&main)?;
@@ -483,12 +568,7 @@ fn update_claude_json(account: &Account) -> Result<()> {
 }
 
 fn write_identity(path: &Path, account: &Account) -> Result<()> {
-    let mut root: Map<String, Value> = if path.exists() {
-        serde_json::from_str(&std::fs::read_to_string(path).context("reading .claude.json")?)
-            .unwrap_or_default()
-    } else {
-        Map::new()
-    };
+    let mut root = read_json_object(path)?;
 
     let oauth_account = if let Some(meta) = &account.oauth_account {
         // Replace wholesale rather than merge: the fields we'd leave behind
@@ -507,11 +587,66 @@ fn write_identity(path: &Path, account: &Account) -> Result<()> {
         existing
     };
     root.insert("oauthAccount".into(), oauth_account);
+    write_json_atomic(path, &root)
+}
 
-    std::fs::write(path, serde_json::to_string_pretty(&Value::Object(root))?)
-        .context("writing .claude.json")?;
-    set_private(path);
-    Ok(())
+/// Read a JSON-object config file for a read-modify-write. A missing file is an
+/// empty object; anything else that fails to parse is an error, never a blank
+/// slate — writing a blank slate back is how a 400 KB `.claude.json` becomes
+/// `{"oauthAccount": …}`. `claude` rewrites these files constantly, so a parse
+/// failure is retried briefly in case we caught one mid-write.
+fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
+    let name = path.display();
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+            Err(e) => return Err(e).with_context(|| format!("reading {name}")),
+        };
+        match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(m)) => return Ok(m),
+            Ok(_) => return Err(anyhow!("{name} isn't a JSON object; leaving it alone")),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow!(
+        "{name} isn't valid JSON ({}); leaving it alone",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
+/// Replace a config file atomically: write a sibling temp file, then rename it
+/// over the target, so neither a crash nor a concurrent reader ever sees a
+/// half-written file. Symlinks are followed (the link survives) and an existing
+/// file's permissions are kept; new files are owner-only.
+fn write_json_atomic(path: &Path, root: &Map<String, Value>) -> Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no file name", target.display()))?
+        .to_string_lossy();
+    let tmp = dir.join(format!(".{file_name}.clyde-{}.tmp", std::process::id()));
+
+    let body = serde_json::to_string_pretty(&Value::Object(root.clone()))?;
+    let result = (|| -> Result<()> {
+        std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
+        match std::fs::metadata(&target) {
+            Ok(meta) => std::fs::set_permissions(&tmp, meta.permissions())?,
+            Err(_) => set_private(&tmp),
+        }
+        std::fs::rename(&tmp, &target).with_context(|| format!("replacing {}", target.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -531,6 +666,94 @@ mod tests {
         let d = std::env::temp_dir().join(format!("clyde_test_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    fn account_with_email(email: &str) -> Account {
+        serde_json::from_value(json!({
+            "id": "t", "label": "t", "email": email,
+            "credential": { "access_token": "a", "refresh_token": "r", "expires_at": 0, "scopes": [] }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn identity_write_refuses_an_unparsable_config_and_leaves_it_untouched() {
+        let path = tmp("torn").join(".claude.json");
+        let torn = r#"{"projects": {"/a": {}}, "mcpServers": {"x"#; // caught mid-write
+        std::fs::write(&path, torn).unwrap();
+
+        assert!(write_identity(&path, &account_with_email("b@x.com")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), torn);
+    }
+
+    #[test]
+    fn identity_write_keeps_every_other_key_and_follows_symlinks() {
+        let dir = tmp("keep");
+        let real = dir.join("real.json");
+        let link = dir.join(".claude.json");
+        let _ = std::fs::remove_file(&link);
+        std::fs::write(
+            &real,
+            r#"{"projects": {"/a": {}}, "mcpServers": {"x": {}}, "oauthAccount": {"emailAddress": "a@x.com"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_identity(&link, &account_with_email("b@x.com")).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(v["oauthAccount"]["emailAddress"], "b@x.com");
+        assert!(v["projects"]["/a"].is_object() && v["mcpServers"]["x"].is_object());
+        // No temp files left behind.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn secret_goes_over_stdin_as_hex_while_it_fits() {
+        let SecretWrite::Stdin(line) = secret_write_command(SERVICE, r#"{"a":"\"q\""}"#, "me")
+        else {
+            panic!("a small secret must not go through argv");
+        };
+        assert_eq!(
+            line,
+            "add-generic-password -U -s \"Claude Code-credentials\" -a \"me\" \
+             -X \"7b2261223a225c22715c22227d\"\n"
+        );
+    }
+
+    #[test]
+    fn oversized_secret_falls_back_to_argv_instead_of_being_truncated() {
+        // The real item: ~3.7 KB of JSON, most of it `mcpOAuth`.
+        let secret = format!(r#"{{"mcpOAuth":"{}"}}"#, "x".repeat(3700));
+        match secret_write_command(SERVICE, &secret, "me") {
+            SecretWrite::Argv(args) => {
+                let hex = args.last().unwrap();
+                assert_eq!(hex.len(), secret.len() * 2);
+                assert_eq!(&args[..2], ["add-generic-password", "-U"]);
+            }
+            SecretWrite::Stdin(line) => panic!("{}-byte line would be truncated", line.len()),
+        }
+    }
+
+    /// Round-trips through the real keychain under a throwaway service name.
+    /// `cargo test -- --ignored keychain_roundtrip`
+    #[test]
+    #[ignore]
+    fn keychain_roundtrip_small_and_oversized() {
+        let service = "clyde-test-roundtrip";
+        for n in [10, 3700, 6000] {
+            let secret = format!(r#"{{"mcpOAuth":"{}","q":"\"é\""}}"#, "x".repeat(n));
+            write_secret_to(service, &secret, "clyde-test").unwrap();
+            let read = read_secret_from(service);
+            let _ = Command::new("security")
+                .args(["delete-generic-password", "-s", service, "-a", "clyde-test"])
+                .output();
+            assert_eq!(read.unwrap().as_deref(), Some(secret.as_str()), "n={n}");
+        }
     }
 
     #[test]
