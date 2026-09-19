@@ -5,7 +5,9 @@ import { api } from "../lib/api";
 import type { OpenChromeStatus } from "../lib/types";
 
 interface Props {
-  onClose: () => void;
+  onClose?: () => void;
+  /** Render inline (a page in the main window) instead of as a modal. */
+  embedded?: boolean;
   /** Fired whenever a fresh status arrives, so the app can react to `ready`. */
   onStatus: (s: OpenChromeStatus) => void;
 }
@@ -20,7 +22,7 @@ interface Props {
  * that from chrome://extensions — so the checklist walks the user through it
  * and ticks itself off by watching Chrome's own files.
  */
-export function BrowserToolsDialog({ onClose, onStatus }: Props) {
+export function BrowserToolsDialog({ onClose, onStatus, embedded = false }: Props) {
   const [status, setStatus] = useState<OpenChromeStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,20 +68,8 @@ export function BrowserToolsDialog({ onClose, onStatus }: Props) {
   // Loaded under an id the host manifest doesn't admit yet: one more Set up fixes it.
   const needsFinish = wired && loaded && !status!.host_registered;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center">
-      <div className="card no-drag fade-in m-3 max-h-[92vh] w-full max-w-[420px] overflow-y-auto">
-        <div className="flex items-center justify-between border-b border-[var(--color-border-soft)] px-4 py-3">
-          <span className="text-sm font-semibold">Browser tools for every account</span>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1 text-[var(--color-ink-faint)] hover:bg-white/5"
-          >
-            <X size={16} />
-          </button>
-        </div>
-
-        <div className="flex flex-col gap-3 p-4">
+  const body = (
+        <div className={`flex flex-col gap-3 ${embedded ? "" : "p-4"}`}>
           <p className="text-xs leading-relaxed text-[var(--color-ink-soft)]">
             Claude Code's own Chrome connection belongs to one account, so it
             drops every time you switch. This sets up{" "}
@@ -217,6 +207,23 @@ export function BrowserToolsDialog({ onClose, onStatus }: Props) {
             </div>
           )}
         </div>
+  );
+
+  if (embedded) return body;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center">
+      <div className="card no-drag fade-in m-3 max-h-[92vh] w-full max-w-[420px] overflow-y-auto">
+        <div className="flex items-center justify-between border-b border-[var(--color-border-soft)] px-4 py-3">
+          <span className="text-sm font-semibold">Browser tools for every account</span>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1 text-[var(--color-ink-faint)] hover:bg-white/5"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {body}
       </div>
     </div>
   );
@@ -271,7 +278,7 @@ function PrimaryButton({
     <button
       onClick={onClick}
       disabled={busy}
-      className="flex items-center justify-center gap-2 self-start rounded-xl bg-[var(--color-clay)] px-3 py-2 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-50"
+      className="flex items-center justify-center gap-2 self-start rounded-xl bg-[var(--color-clay)] px-3 py-2 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-50"
     >
       {busy && <RefreshCw size={13} className="animate-spin" />}
       {children}

@@ -24,6 +24,40 @@ export interface AccountView {
   subscription_type: string | null;
   usage: UsageSnapshot;
   is_active: boolean;
+  /** Why the last usage read failed, when it did. */
+  usage_error: string | null;
+  forecasts: Forecast[];
+}
+
+/** When a limit runs out at the current pace. */
+export interface Forecast {
+  label: string;
+  per_hour: number;
+  minutes_to_full: number | null;
+}
+
+/** One history sample: each limit's percentage at time `t` (ms). */
+export interface HistoryPoint {
+  t: number;
+  account: string;
+  limits: Record<string, number>;
+}
+
+export interface Session {
+  pid: number;
+  cwd: string | null;
+  running_secs: number | null;
+  config_dir: string | null;
+}
+
+export interface Settings {
+  alerts_enabled: boolean;
+  alert_thresholds: number[];
+  notify_on_reset: boolean;
+  alert_all_accounts: boolean;
+  menubar_readout: boolean;
+  /** Empty string = no shortcut. */
+  shortcut: string;
 }
 
 export interface AppSnapshot {

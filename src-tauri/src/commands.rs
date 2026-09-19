@@ -75,6 +75,62 @@ pub fn open_chrome_extensions_page() -> CmdResult<()> {
     open_chrome::open_extensions_page().map_err(err)
 }
 
+#[tauri::command]
+pub fn get_settings(core: State<SharedCore>) -> crate::settings::Settings {
+    core.settings()
+}
+
+/// Save settings and apply the parts that live outside the engine (shortcut).
+#[tauri::command]
+pub fn set_settings(
+    app: tauri::AppHandle,
+    core: State<SharedCore>,
+    settings: crate::settings::Settings,
+) -> CmdResult<crate::settings::Settings> {
+    let saved = core.set_settings(settings).map_err(err)?;
+    crate::apply_shortcut(&app, &saved.shortcut);
+    Ok(saved)
+}
+
+/// Usage history for one account over the last `hours`.
+#[tauri::command]
+pub fn get_history(
+    core: State<SharedCore>,
+    account_id: String,
+    hours: i64,
+) -> Vec<crate::history::Point> {
+    core.history(&account_id, now_ms() - hours.max(1) * 3_600_000)
+}
+
+#[tauri::command]
+pub async fn list_sessions() -> Vec<crate::sessions::Session> {
+    tauri::async_runtime::spawn_blocking(crate::sessions::list)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn test_notification(core: State<SharedCore>) {
+    core.notify(
+        "Clyde alerts are on",
+        "You'll hear from Clyde like this when a limit crosses your thresholds.",
+    );
+}
+
+#[tauri::command]
+pub fn get_autostart(app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    let m = app.autolaunch();
+    if enabled { m.enable() } else { m.disable() }.map_err(err)?;
+    Ok(m.is_enabled().unwrap_or(enabled))
+}
+
 /// What `set_active_account` returns: the fresh snapshot, plus how many
 /// `claude` sessions were running at switch time so the UI can tell the user
 /// what the switch means for them (new credential within ~30 s; a connected

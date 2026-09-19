@@ -179,7 +179,7 @@ function ImportTab({ busy, setBusy, setError, onDone }: TabProps) {
               <span
                 className={`grid h-5 w-5 shrink-0 place-items-center rounded-md border ${
                   on
-                    ? "border-[var(--color-clay)] bg-[var(--color-clay)] text-[#1a0f0a]"
+                    ? "border-[var(--color-clay)] bg-[var(--color-clay)] text-[var(--n-on-accent,#1a0f0a)]"
                     : "border-[var(--color-border)]"
                 }`}
               >
@@ -198,7 +198,7 @@ function ImportTab({ busy, setBusy, setError, onDone }: TabProps) {
       <button
         disabled={busy || selected.size === 0}
         onClick={doImport}
-        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-40"
+        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-40"
       >
         {busy ? "Importing…" : `Import ${selected.size} ${selected.size === 1 ? "account" : "accounts"}`}
       </button>
@@ -250,7 +250,7 @@ function BrowserTab({ busy, setBusy, setError, onDone }: TabProps) {
         <button
           disabled={busy}
           onClick={start}
-          className="flex items-center justify-center gap-2 rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-50"
+          className="flex items-center justify-center gap-2 rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-50"
         >
           <Globe size={15} />
           {busy ? "Opening browser…" : "Sign in with browser"}
@@ -289,7 +289,7 @@ function BrowserTab({ busy, setBusy, setError, onDone }: TabProps) {
       <button
         disabled={busy || !code.trim()}
         onClick={complete}
-        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-40"
+        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-40"
       >
         {busy ? "Signing in…" : "Finish sign-in"}
       </button>
@@ -343,7 +343,7 @@ function NewAccountTab({ busy, setBusy, setError, onDone }: TabProps) {
         <button
           disabled={busy}
           onClick={openLogin}
-          className="flex items-center justify-center gap-2 rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-50"
+          className="flex items-center justify-center gap-2 rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-50"
         >
           <Terminal size={15} />
           {busy ? "Opening terminal…" : "Open Claude sign-in"}
@@ -364,7 +364,7 @@ function NewAccountTab({ busy, setBusy, setError, onDone }: TabProps) {
       <button
         disabled={busy}
         onClick={finishImport}
-        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-50"
+        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-50"
       >
         {busy ? "Importing…" : "I've signed in — import"}
       </button>
@@ -416,7 +416,7 @@ function TokenTab({ busy, setBusy, setError, onDone }: TabProps) {
       <button
         disabled={busy || !tokenJson.trim()}
         onClick={submit}
-        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[#1a0f0a] hover:opacity-90 disabled:opacity-40"
+        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-40"
       >
         {busy ? "Importing…" : "Import account"}
       </button>

@@ -55,6 +55,10 @@ any stale proxy integration a previous version left in `settings.json`
 | `import_claude.rs` | Discover & import existing logins from Claude Code config dirs / keychain entries. |
 | `chrome_link.rs` | Which claude.ai account the official Claude-in-Chrome extension is on (explains `/chrome` breaking after a switch). |
 | `open_chrome.rs` | Optional account-independent browser tools (Open Claude in Chrome): pinned download, native host + user-scope MCP registration, status. PolyForm NC — never bundle it. |
+| `settings.rs` | User preferences (alerts, menubar readout, shortcut) as JSON in the app data dir. |
+| `history.rs` | Per-poll usage history (`history.jsonl`, 30 days) + least-squares burn-rate forecasts. |
+| `alerts.rs` | Pure: which notifications a new usage reading deserves (threshold crossings, resets). |
+| `sessions.rs` | Running `claude` processes: cwd (`lsof`), uptime, own `CLAUDE_CONFIG_DIR` (`ps -E`). |
 | `commands.rs` | Tauri commands exposed to the UI (the only Rust↔JS surface). |
 | `lib.rs` | App wiring: plugins, tray menu, window hide-on-close, usage poll loop, command registration. |
 
@@ -80,6 +84,15 @@ any stale proxy integration a previous version left in `settings.json`
   `clyde://update` Tauri event (`UPDATE_EVENT`). The UI never sees raw tokens — only DTOs.
 
 ### Frontend (`src/`)
+
+Two windows, one bundle: `main.tsx` routes by window label. `popover` is the menubar
+popover (`popover/Popover.tsx`, frosted via `windowEffects: popover`, tray-anchored in
+`lib.rs::toggle_popover`, hides on blur). `main` is the sidebar window (`App.tsx` +
+`pages/*`, frosted sidebar via `windowEffects: sidebar`, page in the URL hash). Both use
+the native look in `native.css` (`--n-*` tokens, follows light/dark; also remaps the old
+`--color-*` tokens so older dialogs match) and the shared kit in `ui/kit.tsx`.
+Debug builds only: `CLYDE_SHOW_POPOVER=1` opens the popover at launch, `CLYDE_PAGE=usage`
+opens a page, and `js_log` forwards webview errors to the Rust log.
 
 Thin client. `lib/api.ts` is the single typed bridge — every backend call is an `invoke<…>` here,
 mirroring the commands registered in `lib.rs`. `lib/useSnapshot.ts` subscribes to `clyde://update`

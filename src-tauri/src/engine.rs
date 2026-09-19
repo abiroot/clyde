@@ -4,13 +4,20 @@
 //! Claude Code's own credential store via [`crate::claude_sync`].
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
+use crate::history::{History, Point};
 use crate::model::*;
-use crate::{chrome_link, claude_sync, import_claude, oauth, vault};
+use crate::settings::Settings;
+use crate::{alerts, chrome_link, claude_sync, import_claude, oauth, settings, vault};
+
+/// The tray icon's id (see `lib.rs`), for the menubar readout.
+pub const TRAY_ID: &str = "clyde-tray";
 
 /// Refresh an access token this many ms before it actually expires.
 const REFRESH_SKEW_MS: i64 = 60_000;
@@ -25,11 +32,16 @@ pub struct Core {
     state: RwLock<CoreState>,
     refresh_lock: tokio::sync::Mutex<()>,
     app: RwLock<Option<AppHandle>>,
+    /// App data directory (settings, history); known once the app is attached.
+    data_dir: RwLock<Option<PathBuf>>,
+    prefs: RwLock<Settings>,
+    history: RwLock<History>,
 }
 
 struct CoreState {
     accounts: Vec<Account>,
     usage: HashMap<String, UsageSnapshot>,
+    usage_errors: HashMap<String, String>,
     active_id: Option<String>,
 }
 
@@ -46,16 +58,74 @@ impl Core {
             http,
             refresh_lock: tokio::sync::Mutex::new(()),
             app: RwLock::new(None),
+            data_dir: RwLock::new(None),
+            prefs: RwLock::new(Settings::default()),
+            history: RwLock::new(History::default()),
             state: RwLock::new(CoreState {
                 accounts,
                 usage: HashMap::new(),
+                usage_errors: HashMap::new(),
                 active_id,
             }),
         }))
     }
 
     pub fn attach_app(&self, app: AppHandle) {
+        if let Ok(dir) = app.path().app_data_dir() {
+            *self.prefs.write().unwrap() = settings::load(&dir);
+            *self.history.write().unwrap() = History::open(&dir, now_ms());
+            *self.data_dir.write().unwrap() = Some(dir);
+        }
         *self.app.write().unwrap() = Some(app);
+    }
+
+    // ---- settings ---------------------------------------------------------
+
+    pub fn settings(&self) -> Settings {
+        self.prefs.read().unwrap().clone()
+    }
+
+    pub fn set_settings(&self, new: Settings) -> Result<Settings> {
+        let new = new.normalized();
+        if let Some(dir) = self.data_dir.read().unwrap().as_ref() {
+            settings::save(dir, &new)?;
+        }
+        *self.prefs.write().unwrap() = new.clone();
+        self.update_tray_readout();
+        Ok(new)
+    }
+
+    /// An account's usage history since `since` (ms).
+    pub fn history(&self, account_id: &str, since: i64) -> Vec<Point> {
+        self.history.read().unwrap().series(account_id, since)
+    }
+
+    /// Put the active account's tightest limit next to the menubar icon.
+    pub fn update_tray_readout(&self) {
+        let Some(app) = self.app.read().unwrap().clone() else {
+            return;
+        };
+        let Some(tray) = app.tray_by_id(TRAY_ID) else {
+            return;
+        };
+        let title = if self.prefs.read().unwrap().menubar_readout {
+            let s = self.state.read().unwrap();
+            s.active_id
+                .as_ref()
+                .and_then(|id| s.usage.get(id))
+                .and_then(tightest)
+                .map(|p| format!("{}%", p.round()))
+        } else {
+            None
+        };
+        let _ = tray.set_title(title);
+    }
+
+    /// Send a test notification (Settings → Alerts).
+    pub fn notify(&self, title: &str, body: &str) {
+        if let Some(app) = self.app.read().unwrap().as_ref() {
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
     }
 
     // ---- snapshot / UI ----------------------------------------------------
@@ -78,6 +148,8 @@ impl Core {
                 subscription_type: a.subscription_type.clone(),
                 usage: s.usage.get(&a.id).cloned().unwrap_or_default(),
                 is_active: Some(&a.id) == active_id.as_ref(),
+                usage_error: s.usage_errors.get(&a.id).cloned(),
+                forecasts: self.history.read().unwrap().forecasts(&a.id, now_ms()),
             })
             .collect();
 
@@ -445,10 +517,42 @@ impl Core {
     // ---- usage + tokens ---------------------------------------------------
 
     pub fn record_usage(&self, account_id: &str, snap: UsageSnapshot) {
-        {
+        let (prev, name, is_active) = {
             let mut s = self.state.write().unwrap();
-            s.usage.insert(account_id.to_string(), snap);
+            s.usage_errors.remove(account_id);
+            let prev = s.usage.insert(account_id.to_string(), snap.clone());
+            let name = s
+                .accounts
+                .iter()
+                .find(|a| a.id == account_id)
+                .map(|a| a.email.clone().unwrap_or_else(|| a.label.clone()))
+                .unwrap_or_default();
+            (prev, name, s.active_id.as_deref() == Some(account_id))
+        };
+
+        self.history
+            .write()
+            .unwrap()
+            .push(Point::from_snapshot(account_id, &snap));
+
+        let prefs = self.settings();
+        if is_active || prefs.alert_all_accounts {
+            for a in alerts::evaluate(&name, prev.as_ref(), &snap, &prefs, now_ms() / 1000) {
+                self.notify(&a.title, &a.body);
+            }
         }
+
+        self.update_tray_readout();
+        self.emit();
+    }
+
+    /// Remember why an account's usage couldn't be read.
+    fn record_usage_error(&self, account_id: &str, error: String) {
+        self.state
+            .write()
+            .unwrap()
+            .usage_errors
+            .insert(account_id.to_string(), error);
         self.emit();
     }
 
@@ -480,6 +584,7 @@ impl Core {
             self.backfill_identity(&id).await;
             if let Err(e) = self.fetch_account_usage(&id).await {
                 tracing::debug!("usage fetch failed for {id}: {e:#}");
+                self.record_usage_error(&id, short_error(&e));
             }
         }
 
@@ -552,7 +657,10 @@ impl Core {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("usage endpoint returned {}", resp.status()));
+            return Err(anyhow!(
+                "usage endpoint returned {}",
+                resp.status().as_u16()
+            ));
         }
         let body: serde_json::Value = resp.json().await?;
         if let Some(snap) = crate::usage::parse(&body) {
@@ -651,4 +759,28 @@ impl Core {
 
 fn upstream() -> String {
     std::env::var("CLYDE_UPSTREAM").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
+}
+
+/// The highest percentage across an account's limits — what decides whether
+/// it can take more work.
+pub fn tightest(u: &UsageSnapshot) -> Option<f64> {
+    u.five_hour_utilization
+        .into_iter()
+        .chain(u.seven_day_utilization)
+        .chain(u.scoped_limits.iter().map(|l| l.percent))
+        .reduce(f64::max)
+}
+
+/// A one-line, user-facing reason for a failed usage read.
+fn short_error(e: &anyhow::Error) -> String {
+    let msg = format!("{e:#}");
+    if msg.contains("returned 429") {
+        "Anthropic is rate-limiting usage checks; retrying".into()
+    } else if msg.contains("returned 401") || msg.contains("returned 403") {
+        "Signed out — add this account again".into()
+    } else if msg.contains("refresh") {
+        "Couldn't refresh the login".into()
+    } else {
+        "Couldn't read usage".into()
+    }
 }

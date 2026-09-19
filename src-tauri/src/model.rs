@@ -109,6 +109,11 @@ pub struct AccountView {
     pub usage: UsageSnapshot,
     /// Whether this account is the one currently selected to serve traffic.
     pub is_active: bool,
+    /// Why the last usage read failed (e.g. rate-limited), so the UI can say so
+    /// instead of showing stale or empty gauges as if they were real.
+    pub usage_error: Option<String>,
+    /// Burn-rate forecasts per limit, from recent history.
+    pub forecasts: Vec<crate::history::Forecast>,
 }
 
 /// Snapshot of the whole engine for the UI to render in one shot.

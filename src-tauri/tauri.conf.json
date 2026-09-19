@@ -14,20 +14,50 @@
       {
         "label": "main",
         "title": "Clyde",
-        "width": 480,
-        "height": 760,
-        "minWidth": 420,
-        "minHeight": 620,
+        "width": 880,
+        "height": 620,
+        "minWidth": 720,
+        "minHeight": 520,
         "resizable": true,
         "fullscreen": false,
         "center": true,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": [
+            "sidebar"
+          ],
+          "state": "followsWindowActiveState"
+        }
+      },
+      {
+        "label": "popover",
+        "title": "Clyde",
+        "url": "index.html",
+        "width": 340,
+        "height": 480,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": true,
+        "focus": true,
+        "windowEffects": {
+          "effects": [
+            "popover"
+          ],
+          "state": "active",
+          "radius": 12
+        }
       }
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,

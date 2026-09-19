@@ -3,8 +3,11 @@ import type {
   AppSnapshot,
   ChromeLink,
   Discovered,
+  HistoryPoint,
   LoginStart,
   OpenChromeStatus,
+  Session,
+  Settings,
   SwitchOutcome,
 } from "./types";
 
@@ -14,6 +17,21 @@ export const api = {
   getChromeLink: () => invoke<ChromeLink>("get_chrome_link"),
 
   getOpenChrome: () => invoke<OpenChromeStatus>("get_open_chrome"),
+
+  getSettings: () => invoke<Settings>("get_settings"),
+
+  setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
+
+  getHistory: (accountId: string, hours: number) =>
+    invoke<HistoryPoint[]>("get_history", { accountId, hours }),
+
+  listSessions: () => invoke<Session[]>("list_sessions"),
+
+  testNotification: () => invoke<void>("test_notification"),
+
+  getAutostart: () => invoke<boolean>("get_autostart"),
+
+  setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
 
   setupOpenChrome: () => invoke<OpenChromeStatus>("setup_open_chrome"),
 

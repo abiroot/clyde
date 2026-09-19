@@ -1,0 +1,267 @@
+/*
+ * Native macOS look, shared by both windows. The popover is frosted by macOS
+ * (windowEffects: popover) and the main window's sidebar by `sidebar`, so the
+ * page stays transparent there and draws only text, bars and hover states; the
+ * main window's content pane paints its own opaque background.
+ * Follows the system light/dark setting.
+ */
+:root.native {
+  --n-text: rgba(0, 0, 0, 0.85);
+  --n-text-2: rgba(0, 0, 0, 0.5);
+  --n-text-3: rgba(0, 0, 0, 0.3);
+  --n-sep: rgba(0, 0, 0, 0.1);
+  --n-track: rgba(0, 0, 0, 0.08);
+  --n-hover: rgba(0, 0, 0, 0.05);
+  --n-accent: AccentColor;
+  --n-on-accent: #fff;
+  --n-ok: #28cd41;
+  --n-warn: #ff9500;
+  --n-danger: #ff3b30;
+  --n-window: #ffffff;
+  --n-card: rgba(0, 0, 0, 0.03);
+  --n-card-border: rgba(0, 0, 0, 0.08);
+  --n-selected: rgba(0, 0, 0, 0.08);
+  /* Chart series (dataviz reference palette, validated for this mode). */
+  --n-series-1: #2a78d6;
+  --n-series-2: #eb6834;
+  --n-series-3: #1baf7a;
+  --n-series-4: #eda100;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root.native {
+    --n-text: rgba(255, 255, 255, 0.88);
+    --n-text-2: rgba(255, 255, 255, 0.55);
+    --n-text-3: rgba(255, 255, 255, 0.3);
+    --n-sep: rgba(255, 255, 255, 0.1);
+    --n-track: rgba(255, 255, 255, 0.1);
+    --n-hover: rgba(255, 255, 255, 0.06);
+    --n-ok: #32d74b;
+    --n-warn: #ff9f0a;
+    --n-danger: #ff453a;
+    --n-window: #1e1e1e;
+    --n-card: rgba(255, 255, 255, 0.04);
+    --n-card-border: rgba(255, 255, 255, 0.08);
+    --n-selected: rgba(255, 255, 255, 0.1);
+    --n-series-1: #3987e5;
+    --n-series-2: #d95926;
+    --n-series-3: #199e70;
+    --n-series-4: #c98500;
+  }
+}
+
+/* Clyde's original tokens, re-pointed at native values so the older dialogs
+   (Add account, browser tools) match without a rewrite. */
+:root.native {
+  --color-canvas: var(--n-window);
+  --color-surface: var(--n-window);
+  --color-surface-2: var(--n-track);
+  --color-border: var(--n-sep);
+  --color-border-soft: var(--n-sep);
+  --color-ink: var(--n-text);
+  --color-ink-soft: var(--n-text-2);
+  --color-ink-faint: var(--n-text-3);
+  --color-clay: var(--n-accent);
+  --color-clay-soft: var(--n-accent);
+  --color-clay-dim: var(--n-selected);
+  --color-ok: var(--n-ok);
+  --color-warn: var(--n-warn);
+  --color-danger: var(--n-danger);
+}
+:root.native .card {
+  background: var(--n-window);
+  border: 1px solid var(--n-card-border);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+
+/* Both windows let macOS's frosting show through; the main window's content
+   pane paints its own background. */
+:root.native,
+:root.native body,
+:root.native #root {
+  background: transparent;
+}
+
+/* The popover sizes itself to its content. */
+:root.native.popover,
+:root.native.popover body,
+:root.native.popover #root {
+  height: auto;
+}
+
+:root.native body {
+  color: var(--n-text);
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  letter-spacing: -0.01em;
+}
+
+/* The original ambient glow doesn't belong on frosted glass. */
+:root.native body::before {
+  display: none;
+}
+
+.n-sep {
+  height: 1px;
+  background: var(--n-sep);
+  margin: 6px 12px;
+}
+
+.n-section {
+  padding: 4px 14px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--n-text-2);
+}
+
+/* A menu-style row: highlights with the system accent on hover, like NSMenu. */
+.n-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 6px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: default;
+}
+.n-menu-row:hover {
+  background: var(--n-accent);
+  color: var(--n-on-accent);
+}
+.n-menu-row:hover .n-dim {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.n-dim {
+  color: var(--n-text-2);
+}
+
+.n-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--n-track);
+  overflow: hidden;
+}
+.n-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.n-button {
+  font: inherit;
+  font-size: 12px;
+  padding: 1px 9px;
+  border-radius: 5px;
+  border: 0;
+  background: var(--n-accent);
+  color: var(--n-on-accent);
+}
+.n-button:disabled {
+  opacity: 0.5;
+}
+
+/* ---- main window --------------------------------------------------------- */
+
+/* A System Settings–style grouped box. */
+/* No overflow clipping: row menus (the "…" button) must be able to extend
+   past the group's edge. */
+.n-group {
+  border-radius: 10px;
+  background: var(--n-card);
+  border: 1px solid var(--n-card-border);
+}
+.n-group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  min-height: 36px;
+}
+.n-group-row + .n-group-row {
+  border-top: 1px solid var(--n-sep);
+}
+
+/* Toggle switch, sized like macOS's small switch. */
+.n-switch {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 9px;
+  background: var(--n-track);
+  transition: background 0.15s ease;
+}
+.n-switch[data-on="true"] {
+  background: var(--n-accent);
+}
+.n-switch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s ease;
+}
+.n-switch[data-on="true"] > span {
+  transform: translateX(14px);
+}
+
+.n-segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--n-track);
+}
+.n-segmented > button {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--n-text);
+}
+.n-segmented > button[aria-selected="true"] {
+  background: var(--n-window);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.n-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--n-text);
+  font: inherit;
+  text-align: left;
+}
+.n-sidebar-item:hover {
+  background: var(--n-hover);
+}
+.n-sidebar-item[aria-current="page"] {
+  background: var(--n-selected);
+}
+
+.n-plain-button {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--n-card-border);
+  background: var(--n-window);
+  color: var(--n-text);
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.1);
+}
+.n-plain-button:disabled {
+  opacity: 0.5;
+}

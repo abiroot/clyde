@@ -1,119 +1,110 @@
 import { useEffect, useState } from "react";
+import { Activity, Gauge, Globe, Plus, Settings2, TerminalSquare } from "lucide-react";
 import { api } from "./lib/api";
 import { useSnapshot } from "./lib/useSnapshot";
-import type { AppSnapshot, OpenChromeStatus } from "./lib/types";
-import { Dashboard } from "./views/Dashboard";
-import { Onboarding } from "./views/Onboarding";
+import type { OpenChromeStatus } from "./lib/types";
 import { AddAccountDialog } from "./components/AddAccountDialog";
-import { ChromeChip } from "./components/ChromeChip";
 import { BrowserToolsDialog } from "./components/BrowserToolsDialog";
+import { OverviewPage } from "./pages/OverviewPage";
+import { UsagePage } from "./pages/UsagePage";
+import { SessionsPage } from "./pages/SessionsPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { Onboarding } from "./views/Onboarding";
 
+type Page = "overview" | "usage" | "sessions" | "browser" | "settings";
+
+const NAV: { id: Page; label: string; icon: typeof Gauge }[] = [
+  { id: "overview", label: "Accounts", icon: Gauge },
+  { id: "usage", label: "Usage", icon: Activity },
+  { id: "sessions", label: "Sessions", icon: TerminalSquare },
+  { id: "browser", label: "Browser tools", icon: Globe },
+  { id: "settings", label: "Settings", icon: Settings2 },
+];
+
+function pageFromHash(): Page {
+  const h = window.location.hash.slice(1) as Page;
+  return NAV.some((n) => n.id === h) ? h : "overview";
+}
+
+/**
+ * The full window: a translucent sidebar (frosted by macOS) and an opaque
+ * content pane, laid out like System Settings. Quick glances live in the
+ * menubar popover; this is for managing accounts, history, sessions and setup.
+ */
 export default function App() {
   const { snapshot, setSnapshot } = useSnapshot();
+  const [page, setPageState] = useState<Page>(pageFromHash);
+  // The page lives in the URL hash, so it survives reloads and can be linked.
+  const setPage = (p: Page) => {
+    window.location.hash = p;
+    setPageState(p);
+  };
+  useEffect(() => {
+    const on = () => setPageState(pageFromHash());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
   const [showAdd, setShowAdd] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [showBrowserTools, setShowBrowserTools] = useState(false);
-  // Account-independent browser tools. When they're wired, an account switch
-  // can't break the browser, so the per-account Chrome warnings stay quiet.
   const [openChrome, setOpenChrome] = useState<OpenChromeStatus | null>(null);
 
   useEffect(() => {
     api.getOpenChrome().then(setOpenChrome).catch(() => setOpenChrome(null));
   }, [snapshot?.active_id]);
 
-  if (!snapshot) return <Splash />;
-
-  const apply = (p: Promise<AppSnapshot>) => p.then(setSnapshot).catch(console.error);
-
-  const activate = async (id: string) => {
-    setBusyId(id);
-    setError(null);
-    setNotice(null);
-    try {
-      const { snapshot, running_sessions } = await api.setActiveAccount(id);
-      setSnapshot(snapshot);
-      if (running_sessions > 0) {
-        const n = running_sessions;
-        setNotice(
-          `${n} running claude session${n === 1 ? "" : "s"} will switch to ` +
-            `this account within ~30 seconds.` +
-            (openChrome?.ready
-              ? " Browser tools keep working."
-              : " A session using Chrome browser tools loses that connection " +
-                "when its account changes — restart claude to re-pair, and " +
-                "note that /chrome only reconnects once Chrome is signed into " +
-                "this same account."),
-        );
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const current = NAV.find((n) => n.id === page)!;
 
   return (
-    <div className="relative z-10 flex h-full flex-col">
-      <TitleBar snapshot={snapshot} />
+    <div className="flex h-full">
+      <aside data-tauri-drag-region className="flex w-[196px] shrink-0 flex-col gap-0.5 px-2.5 pb-3 pt-[46px]">
+        {NAV.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            className="n-sidebar-item"
+            aria-current={page === id ? "page" : undefined}
+            onClick={() => setPage(id)}
+          >
+            <Icon size={15} strokeWidth={1.75} className="text-[var(--n-accent)]" />
+            {label}
+          </button>
+        ))}
+        <div className="flex-1" data-tauri-drag-region />
+        <button className="n-sidebar-item n-dim" onClick={() => setShowAdd(true)}>
+          <Plus size={15} strokeWidth={1.75} />
+          Add account
+        </button>
+      </aside>
 
-      <main className="flex flex-1 flex-col overflow-hidden">
-        {error && (
-          <div className="mx-4 mt-1 mb-2 flex items-start justify-between gap-2 rounded-lg border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 px-3 py-2 text-[11px] text-[var(--color-danger)]">
-            <span className="leading-snug">Couldn't switch account: {error}</span>
-            <button
-              onClick={() => setError(null)}
-              className="shrink-0 font-medium hover:opacity-70"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
+      <main className="flex min-w-0 flex-1 flex-col bg-[var(--n-window)]">
+        <header data-tauri-drag-region className="flex h-[46px] shrink-0 items-center px-6">
+          <h1 data-tauri-drag-region className="text-[15px] font-semibold">
+            {current.label}
+          </h1>
+        </header>
 
-        {notice && (
-          <div className="mx-4 mt-1 mb-2 flex items-start justify-between gap-2 rounded-lg border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-3 py-2 text-[11px] text-[var(--color-warn)]">
-            <span className="leading-snug">{notice}</span>
-            <button
-              onClick={() => setNotice(null)}
-              className="shrink-0 font-medium hover:opacity-70"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        {snapshot.accounts.length > 0 && !openChrome?.ready && (
-          <ChromeChip
-            snapshot={snapshot}
-            onActivate={activate}
-            onOpenBrowserTools={() => setShowBrowserTools(true)}
-            busyId={busyId}
-          />
-        )}
-
-        {snapshot.accounts.length === 0 ? (
-          <Onboarding onAdd={() => setShowAdd(true)} />
-        ) : (
-          <Dashboard
-            snapshot={snapshot}
-            busyId={busyId}
-            onAdd={() => setShowAdd(true)}
-            onActivate={activate}
-            browserToolsReady={!!openChrome?.ready}
-            onOpenBrowserTools={() => setShowBrowserTools(true)}
-            onRename={(id, label) => apply(api.renameAccount(id, label))}
-            onRemove={(id) => apply(api.removeAccount(id))}
-          />
-        )}
+        <div className="flex-1 overflow-y-auto px-6 pb-8">
+          {!snapshot ? null : snapshot.accounts.length === 0 && page === "overview" ? (
+            <Onboarding onAdd={() => setShowAdd(true)} />
+          ) : page === "overview" ? (
+            <OverviewPage
+              snapshot={snapshot}
+              setSnapshot={setSnapshot}
+              browserReady={!!openChrome?.ready}
+              onOpenBrowserTools={() => setPage("browser")}
+              onAdd={() => setShowAdd(true)}
+            />
+          ) : page === "usage" ? (
+            <UsagePage snapshot={snapshot} />
+          ) : page === "sessions" ? (
+            <SessionsPage />
+          ) : page === "browser" ? (
+            <div className="max-w-[560px]">
+              <BrowserToolsDialog embedded onStatus={setOpenChrome} />
+            </div>
+          ) : (
+            <SettingsPage />
+          )}
+        </div>
       </main>
-
-      {showBrowserTools && (
-        <BrowserToolsDialog
-          onClose={() => setShowBrowserTools(false)}
-          onStatus={setOpenChrome}
-        />
-      )}
 
       {showAdd && (
         <AddAccountDialog
@@ -124,63 +115,6 @@ export default function App() {
           }}
         />
       )}
-    </div>
-  );
-}
-
-/**
- * The window's draggable title bar. Uses `data-tauri-drag-region` (the OS-level
- * drag API) rather than the `-webkit-app-region` CSS hack, which is unreliable
- * on macOS. Decorative children are `pointer-events-none` so a mousedown lands
- * on the header itself and starts the drag; the left inset clears the native
- * traffic-light buttons.
- */
-function TitleBar({ snapshot }: { snapshot: AppSnapshot }) {
-  const active =
-    snapshot.active_email ??
-    snapshot.accounts.find((a) => a.id === snapshot.active_id)?.label;
-
-  return (
-    <header
-      data-tauri-drag-region
-      className="relative flex h-12 shrink-0 select-none items-center justify-between gap-3 pl-[78px] pr-4"
-    >
-      <div
-        data-tauri-drag-region
-        className="pointer-events-none flex min-w-0 items-center gap-2"
-      >
-        <span className="text-sm font-semibold tracking-tight">Clyde</span>
-        <span className="truncate text-[11px] text-[var(--color-ink-faint)]">
-          Claude account switcher
-        </span>
-      </div>
-
-      {active && (
-        <div
-          data-tauri-drag-region
-          className="pointer-events-none flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--color-ink-faint)]"
-        >
-          <span
-            className="h-2 w-2 rounded-full"
-            style={{
-              background: "var(--color-ok)",
-              boxShadow: "0 0 6px var(--color-ok)",
-            }}
-          />
-          <span className="max-w-[160px] truncate">{active}</span>
-        </div>
-      )}
-    </header>
-  );
-}
-
-function Splash() {
-  return (
-    <div className="flex h-full items-center justify-center">
-      <div
-        className="h-10 w-10 animate-pulse rounded-2xl"
-        style={{ background: "var(--color-clay)" }}
-      />
     </div>
   );
 }
