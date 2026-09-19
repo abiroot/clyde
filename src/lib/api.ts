@@ -4,6 +4,7 @@ import type {
   ChromeLink,
   Discovered,
   LoginStart,
+  OpenChromeStatus,
   SwitchOutcome,
 } from "./types";
 
@@ -11,6 +12,19 @@ export const api = {
   getSnapshot: () => invoke<AppSnapshot>("get_snapshot"),
 
   getChromeLink: () => invoke<ChromeLink>("get_chrome_link"),
+
+  getOpenChrome: () => invoke<OpenChromeStatus>("get_open_chrome"),
+
+  setupOpenChrome: () => invoke<OpenChromeStatus>("setup_open_chrome"),
+
+  removeOpenChrome: () => invoke<OpenChromeStatus>("remove_open_chrome"),
+
+  setBuiltinChrome: (enabled: boolean) =>
+    invoke<OpenChromeStatus>("set_builtin_chrome", { enabled }),
+
+  revealOpenChromeExtension: () => invoke<void>("reveal_open_chrome_extension"),
+
+  openChromeExtensionsPage: () => invoke<void>("open_chrome_extensions_page"),
 
   discoverClaudeAccounts: () =>
     invoke<Discovered[]>("discover_claude_accounts"),

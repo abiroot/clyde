@@ -442,6 +442,35 @@ fn cleanup_legacy_at(path: &Path, backup: &Path) -> Result<bool> {
 
 // ---- .claude.json ---------------------------------------------------------
 
+/// Claude Code's global config, parsed — for reading keys Clyde doesn't own
+/// (e.g. `mcpServers`). `None` when missing or unreadable.
+pub fn read_global_config() -> Option<Value> {
+    let text = std::fs::read_to_string(claude_json_path().ok()?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Set one boolean top-level key in the global config, preserving everything
+/// else — same file resolution and legacy mirroring as the identity write.
+pub fn set_global_flag(key: &str, value: bool) -> Result<()> {
+    let set = |path: &Path| -> Result<()> {
+        let mut root: Map<String, Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).context("reading .claude.json")?)
+                .context("parsing .claude.json")?;
+        root.insert(key.into(), json!(value));
+        std::fs::write(path, serde_json::to_string_pretty(&Value::Object(root))?)
+            .context("writing .claude.json")?;
+        set_private(path);
+        Ok(())
+    };
+    let main = claude_json_path()?;
+    set(&main)?;
+    let legacy = legacy_claude_json_path()?;
+    if legacy.exists() && legacy != main {
+        set(&legacy)?;
+    }
+    Ok(())
+}
+
 fn update_claude_json(account: &Account) -> Result<()> {
     write_identity(&claude_json_path()?, account)?;
     // Only ever *update* the legacy file — never create one, or we'd resurrect

@@ -7,6 +7,7 @@ mod engine;
 mod import_claude;
 mod model;
 mod oauth;
+mod open_chrome;
 mod usage;
 mod vault;
 
@@ -46,6 +47,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
             commands::get_chrome_link,
+            commands::get_open_chrome,
+            commands::setup_open_chrome,
+            commands::remove_open_chrome,
+            commands::set_builtin_chrome,
+            commands::reveal_open_chrome_extension,
+            commands::open_chrome_extensions_page,
             commands::set_active_account,
             commands::rename_account,
             commands::remove_account,

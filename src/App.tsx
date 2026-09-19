@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "./lib/api";
 import { useSnapshot } from "./lib/useSnapshot";
-import type { AppSnapshot } from "./lib/types";
+import type { AppSnapshot, OpenChromeStatus } from "./lib/types";
 import { Dashboard } from "./views/Dashboard";
 import { Onboarding } from "./views/Onboarding";
 import { AddAccountDialog } from "./components/AddAccountDialog";
 import { ChromeChip } from "./components/ChromeChip";
+import { BrowserToolsDialog } from "./components/BrowserToolsDialog";
 
 export default function App() {
   const { snapshot, setSnapshot } = useSnapshot();
@@ -13,6 +14,14 @@ export default function App() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [showBrowserTools, setShowBrowserTools] = useState(false);
+  // Account-independent browser tools. When they're wired, an account switch
+  // can't break the browser, so the per-account Chrome warnings stay quiet.
+  const [openChrome, setOpenChrome] = useState<OpenChromeStatus | null>(null);
+
+  useEffect(() => {
+    api.getOpenChrome().then(setOpenChrome).catch(() => setOpenChrome(null));
+  }, [snapshot?.active_id]);
 
   if (!snapshot) return <Splash />;
 
@@ -29,10 +38,13 @@ export default function App() {
         const n = running_sessions;
         setNotice(
           `${n} running claude session${n === 1 ? "" : "s"} will switch to ` +
-            `this account within ~30 seconds. A session using Chrome browser ` +
-            `tools loses that connection when its account changes — restart ` +
-            `claude to re-pair, and note that /chrome only reconnects once ` +
-            `Chrome is signed into this same account.`,
+            `this account within ~30 seconds.` +
+            (openChrome?.ready
+              ? " Browser tools keep working."
+              : " A session using Chrome browser tools loses that connection " +
+                "when its account changes — restart claude to re-pair, and " +
+                "note that /chrome only reconnects once Chrome is signed into " +
+                "this same account."),
         );
       }
     } catch (e) {
@@ -71,10 +83,11 @@ export default function App() {
           </div>
         )}
 
-        {snapshot.accounts.length > 0 && (
+        {snapshot.accounts.length > 0 && !openChrome?.ready && (
           <ChromeChip
             snapshot={snapshot}
             onActivate={activate}
+            onOpenBrowserTools={() => setShowBrowserTools(true)}
             busyId={busyId}
           />
         )}
@@ -87,11 +100,20 @@ export default function App() {
             busyId={busyId}
             onAdd={() => setShowAdd(true)}
             onActivate={activate}
+            browserToolsReady={!!openChrome?.ready}
+            onOpenBrowserTools={() => setShowBrowserTools(true)}
             onRename={(id, label) => apply(api.renameAccount(id, label))}
             onRemove={(id) => apply(api.removeAccount(id))}
           />
         )}
       </main>
+
+      {showBrowserTools && (
+        <BrowserToolsDialog
+          onClose={() => setShowBrowserTools(false)}
+          onStatus={setOpenChrome}
+        />
+      )}
 
       {showAdd && (
         <AddAccountDialog

@@ -9,7 +9,7 @@ use tauri::State;
 
 use crate::engine::SharedCore;
 use crate::model::{now_ms, Account, AppSnapshot, Credential};
-use crate::{chrome_link, claude_sync, import_claude, oauth};
+use crate::{chrome_link, claude_sync, import_claude, oauth, open_chrome};
 
 /// In-flight PKCE logins, keyed by an opaque flow id, holding the verifier until
 /// the user pastes back their authorization code.
@@ -33,6 +33,46 @@ pub fn get_snapshot(core: State<SharedCore>) -> AppSnapshot {
 #[tauri::command]
 pub fn get_chrome_link(core: State<SharedCore>) -> chrome_link::ChromeLink {
     core.chrome_link()
+}
+
+/// State of the account-independent browser tools (Open Claude in Chrome).
+/// Reads browser preference files and probes a socket, so it's on demand too.
+#[tauri::command]
+pub fn get_open_chrome() -> open_chrome::OpenChromeStatus {
+    open_chrome::status()
+}
+
+/// Download (if needed) and wire up Open Claude in Chrome. Runs git/npm, so it
+/// goes off the main thread.
+#[tauri::command]
+pub async fn setup_open_chrome() -> CmdResult<open_chrome::OpenChromeStatus> {
+    tauri::async_runtime::spawn_blocking(open_chrome::setup)
+        .await
+        .map_err(err)?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn remove_open_chrome() -> CmdResult<open_chrome::OpenChromeStatus> {
+    tauri::async_runtime::spawn_blocking(open_chrome::remove)
+        .await
+        .map_err(err)?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn set_builtin_chrome(enabled: bool) -> CmdResult<open_chrome::OpenChromeStatus> {
+    open_chrome::set_builtin(enabled).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn reveal_open_chrome_extension() -> CmdResult<()> {
+    open_chrome::reveal_extension().map_err(err)
+}
+
+#[tauri::command]
+pub fn open_chrome_extensions_page() -> CmdResult<()> {
+    open_chrome::open_extensions_page().map_err(err)
 }
 
 /// What `set_active_account` returns: the fresh snapshot, plus how many

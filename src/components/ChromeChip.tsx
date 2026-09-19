@@ -8,6 +8,8 @@ interface Props {
   snapshot: AppSnapshot;
   /** Switch Clyde to the account the browser is already on. */
   onActivate: (id: string) => void;
+  /** Open the setup for browser tools that work with every account. */
+  onOpenBrowserTools: () => void;
   busyId: string | null;
 }
 
@@ -24,7 +26,7 @@ interface Props {
  *
  * Silent when everything already agrees, and when the extension isn't installed.
  */
-export function ChromeChip({ snapshot, onActivate, busyId }: Props) {
+export function ChromeChip({ snapshot, onActivate, onOpenBrowserTools, busyId }: Props) {
   const [link, setLink] = useState<ChromeLink | null>(null);
 
   // Re-read whenever the active account changes: that's exactly the event that
@@ -79,6 +81,12 @@ export function ChromeChip({ snapshot, onActivate, busyId }: Props) {
           className="no-drag font-medium underline underline-offset-2 hover:opacity-70"
         >
           Sign Chrome into {snapshot.active_email ?? "the active account"}
+        </button>
+        <button
+          onClick={onOpenBrowserTools}
+          className="no-drag font-medium underline underline-offset-2 hover:opacity-70"
+        >
+          Make browser tools work for every account
         </button>
       </div>
     </div>

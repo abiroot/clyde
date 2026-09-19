@@ -72,6 +72,14 @@ detects it and says which account Chrome is on; when that's an account Clyde
 already manages, one click switches to it and browser tools work again without
 touching Chrome at all.
 
+**Browser tools for every account (optional).** Clyde can instead set up
+[Open Claude in Chrome](https://github.com/noemica-io/open-claude-in-chrome), an
+open-source extension that reaches Chrome over a local socket with no account
+attached, so browser tools keep working through every switch. Clyde downloads it
+from upstream (pinned to a reviewed commit), installs its helper, and registers it
+with Claude Code; you load the extension once from `chrome://extensions`. See
+[Browser tools](#browser-tools-open-claude-in-chrome) below.
+
 > Full design notes in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Status
@@ -106,9 +114,44 @@ npm run tauri build    # produce a .app / installer
 3. **Use `claude` as normal.** Watch the gauges and switch whenever an account is
    running hot. (New `claude` runs switch immediately; running sessions follow
    within ~30 seconds. If you use `/chrome`, keep the browser signed into the
-   same account — Clyde flags it when they drift apart.)
+   same account — Clyde flags it when they drift apart, or set up the
+   account-independent browser tools below.)
+
+## Browser tools (Open Claude in Chrome)
+
+Optional. Open it from **Make browser tools work for every account** on the
+dashboard. Requires Node.js.
+
+1. **Set up** — Clyde clones the project to `~/Projects/Vendor/open-claude-in-chrome`
+   at the commit it was reviewed against, installs the helper's dependencies
+   (`npm ci --ignore-scripts`), registers the native messaging host for Chrome,
+   Edge and Brave, and adds a user-scope MCP server named `open-claude-in-chrome`.
+2. **Load it in Chrome** — `chrome://extensions` → Developer mode → Load unpacked →
+   the `extension` folder. Clyde predicts the id Chrome assigns and confirms it.
+3. **Restart Chrome.** The checklist ticks itself off.
+
+New `claude` sessions then have `mcp__open-claude-in-chrome__*` tools, whichever
+account is active. Things to know before you turn it on:
+
+- **Licence.** Open Claude in Chrome is licensed **PolyForm Noncommercial 1.0.0**
+  (its README says MIT; the LICENSE file governs). Clyde never ships its code — it
+  downloads it onto your machine — and whether your use is noncommercial is yours
+  to judge.
+- **No site blocklist.** The official extension refuses banking, crypto, payment
+  and some other sites; this one doesn't. Load it in a Chrome profile that isn't
+  signed into anything you wouldn't hand to an agent, and in one profile only.
+- **Unreviewed updates.** Clyde flags the copy if it's moved off the reviewed
+  commit (e.g. after a manual `git pull`).
+- Mouse and keyboard actions use Chrome's debugger API, which Chrome blocks on
+  pages where another extension has injected a frame; reading and navigating
+  still work there.
+- **Remove** in the same dialog unregisters the MCP server and the native host.
 
 ## Security
+
+- Browser tools (optional) run a third-party extension with access to every site
+  in the Chrome profile it's loaded into — see
+  [Browser tools](#browser-tools-open-claude-in-chrome) for the precautions.
 
 - Credentials live only in the OS-native secret store (macOS Keychain / Windows
   Credential Manager / Linux Secret Service) via the `keyring` crate.

@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { Globe, Plus } from "lucide-react";
 import type { AppSnapshot } from "../lib/types";
 import { AccountCard } from "../components/AccountCard";
 
@@ -7,6 +7,9 @@ interface Props {
   busyId: string | null;
   onAdd: () => void;
   onActivate: (id: string) => void;
+  /** Account-independent browser tools are set up. */
+  browserToolsReady: boolean;
+  onOpenBrowserTools: () => void;
   onRename: (id: string, label: string) => void;
   onRemove: (id: string) => void;
 }
@@ -44,9 +47,24 @@ export function Dashboard(props: Props) {
       <p className="px-1 pt-0.5 text-[11px] leading-relaxed text-[var(--color-ink-faint)]">
         Switching rewrites Claude Code's login in place. New <code>claude</code>{" "}
         runs use it immediately; running sessions follow within ~30 seconds.{" "}
-        <code>/chrome</code> is the exception: it pairs per account, so browser
-        tools only work while Chrome is signed into the active account.
+        {props.browserToolsReady ? (
+          <>Browser tools work with every account.</>
+        ) : (
+          <>
+            <code>/chrome</code> is the exception: it pairs per account, so
+            browser tools only work while Chrome is signed into the active
+            account.
+          </>
+        )}
       </p>
+
+      <button
+        onClick={props.onOpenBrowserTools}
+        className="no-drag flex items-center gap-1.5 self-start rounded-lg px-1 py-0.5 text-[11px] font-medium text-[var(--color-clay-soft)] hover:opacity-80"
+      >
+        <Globe size={12} />
+        {props.browserToolsReady ? "Browser tools" : "Make browser tools work for every account"}
+      </button>
     </div>
   );
 }

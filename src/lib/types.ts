@@ -60,6 +60,35 @@ export interface ChromeLink {
   matched: boolean;
 }
 
+/**
+ * Account-independent browser tools (Open Claude in Chrome). It reaches Chrome
+ * over a local socket instead of the per-account cloud pairing, so once every
+ * step is wired, switching accounts can't break the browser.
+ */
+export interface OpenChromeStatus {
+  repo_path: string;
+  downloaded: boolean;
+  commit: string | null;
+  /** The downloaded code is the version Clyde reviewed. */
+  reviewed: boolean;
+  deps_installed: boolean;
+  node_path: string | null;
+  /** The folder to pick in Chrome's "Load unpacked". */
+  extension_dir: string;
+  expected_extension_id: string | null;
+  /** Browser profiles that loaded it, e.g. "Chrome — Default". */
+  loaded_in: string[];
+  loaded_ids: string[];
+  host_registered: boolean;
+  mcp_registered: boolean;
+  /** The native host is running, i.e. the extension is live in a browser. */
+  connected: boolean;
+  /** Claude Code's own account-bound Chrome integration is on. */
+  builtin_enabled: boolean;
+  /** Every piece is wired. */
+  ready: boolean;
+}
+
 export interface LoginStart {
   flow_id: string;
   authorize_url: string;

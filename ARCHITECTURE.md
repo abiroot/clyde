@@ -45,6 +45,7 @@ account — whether or not Clyde is running.
 | `claude_sync.rs` | Make a Clyde account the active Claude Code account by rewriting its keychain entry + `.claude.json`. Also self-heals stale legacy proxy integrations. |
 | `import_claude.rs` | Discover and import existing logins from Claude Code's own config dirs / keychain entries. |
 | `chrome_link.rs` | Read which claude.ai account the Claude-in-Chrome extension is signed into, so the UI can explain why `/chrome` stopped working after a switch. |
+| `open_chrome.rs` | Optional account-independent browser tools: download Open Claude in Chrome (pinned), register its native host + a user-scope MCP server, and report setup status. |
 | `commands.rs` | Tauri commands exposed to the UI (the only Rust↔JS surface). |
 | `lib.rs` | App wiring: plugins, tray, window behavior, the usage-poll loop. |
 
@@ -87,6 +88,26 @@ claude.ai page. What it can do is name the problem: `chrome_link.rs` reads the
 compares it to the active account. When Clyde also manages the account the
 browser is on, the fix costs one click and no browser interaction — switch Clyde
 to it.
+
+### Account-independent browser tools
+
+`open_chrome.rs` sidesteps the rendezvous rather than fighting it. Open Claude in
+Chrome (PolyForm Noncommercial — downloaded from upstream, never bundled) is an
+MCP server that talks to its extension through a native messaging host over a
+unix socket in a `0700` directory under `$TMPDIR`. Nothing on that path carries an
+account. It is registered once at **user scope** in Claude Code's global config
+(via `claude mcp add --scope user`), and `write_identity` preserves every key it
+doesn't own, so `mcpServers` survives each switch untouched.
+
+Setup is idempotent: clone at `PINNED_COMMIT` (and refuse to wire up anything
+else), `npm ci --ignore-scripts` in `host/`, write a wrapper that pins the
+absolute `node` path (Chrome launches native hosts with a bare environment), and
+write `com.anthropic.open_claude_in_chrome.json` for each installed Chromium
+browser. The unpacked extension's id is predicted as Chromium does it —
+SHA-256 of the realpath, first 16 bytes, nibbles mapped to `a..p` — and then read
+back from each profile's `Secure Preferences`; re-running setup rewrites the
+manifest's `allowed_origins` if the two ever differ. Status is read on demand:
+preference files, the MCP entry, and a probe of the socket.
 
 `engine::Core::set_active` wraps this: it first refreshes the account's token if
 stale (so Claude Code gets a non-expired bearer), calls `activate`, then records

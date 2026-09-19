@@ -53,6 +53,8 @@ any stale proxy integration a previous version left in `settings.json`
 | `engine.rs` | `Core`: in-memory source of truth (accounts, active id, usage), token refresh, usage polling, UI event emission. Switching calls into `claude_sync`. |
 | `claude_sync.rs` | Make a Clyde account the active Claude Code account by rewriting its keychain + `.claude.json`. |
 | `import_claude.rs` | Discover & import existing logins from Claude Code config dirs / keychain entries. |
+| `chrome_link.rs` | Which claude.ai account the official Claude-in-Chrome extension is on (explains `/chrome` breaking after a switch). |
+| `open_chrome.rs` | Optional account-independent browser tools (Open Claude in Chrome): pinned download, native host + user-scope MCP registration, status. PolyForm NC — never bundle it. |
 | `commands.rs` | Tauri commands exposed to the UI (the only Rust↔JS surface). |
 | `lib.rs` | App wiring: plugins, tray menu, window hide-on-close, usage poll loop, command registration. |
 
