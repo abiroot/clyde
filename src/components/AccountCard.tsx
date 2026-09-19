@@ -115,6 +115,16 @@ export function AccountCard({ account, busy, onActivate, onRename, onRemove }: P
       <div className="grid grid-cols-2 gap-3">
         <UsageGauge label="5-hour" value={account.usage.five_hour_utilization} />
         <UsageGauge label="7-day" value={account.usage.seven_day_utilization} />
+        {/* Per-model / per-product caps (e.g. "7-day · Fable") — these can run
+            out before the overall weekly limit does. */}
+        {(account.usage.scoped_limits ?? []).map((l) => (
+          <UsageGauge
+            key={l.label}
+            label={l.label}
+            value={l.percent}
+            hint={l.resets_at ? resetsIn(l.resets_at) ?? undefined : undefined}
+          />
+        ))}
       </div>
 
       {/* Footer */}

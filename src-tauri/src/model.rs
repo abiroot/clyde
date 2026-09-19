@@ -80,6 +80,23 @@ pub struct UsageSnapshot {
     pub resets_at: Option<i64>,
     /// Unix epoch milliseconds of the last update.
     pub updated_at: i64,
+    /// Limits beyond the plain 5-hour / 7-day pair — per-model weekly caps
+    /// (e.g. "7-day · Fable") and per-product ones. Empty on older snapshots.
+    #[serde(default)]
+    pub scoped_limits: Vec<UsageLimit>,
+}
+
+/// One scoped limit from the usage endpoint's `limits` array.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// Human label, e.g. `"7-day · Fable"`.
+    pub label: String,
+    /// 0..=100.
+    pub percent: f64,
+    /// Anthropic's own reading: `"normal"` | `"warning"` | `"critical"`.
+    pub severity: Option<String>,
+    /// Unix epoch seconds.
+    pub resets_at: Option<i64>,
 }
 
 /// Secret-free projection of an account for the UI.

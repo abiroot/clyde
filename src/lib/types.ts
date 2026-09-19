@@ -6,6 +6,15 @@ export interface UsageSnapshot {
   status: string | null;
   resets_at: number | null;
   updated_at: number;
+  /** Per-model / per-product caps, e.g. "7-day · Fable". */
+  scoped_limits: UsageLimit[];
+}
+
+export interface UsageLimit {
+  label: string;
+  percent: number;
+  severity: string | null;
+  resets_at: number | null;
 }
 
 export interface AccountView {
