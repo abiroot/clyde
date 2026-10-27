@@ -18,6 +18,8 @@ export function SettingsPage() {
   const [autostart, setAutostart] = useState(false);
   const [version, setVersion] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checked, setChecked] = useState<string | null>(null);
 
   useEffect(() => {
     api.getSettings().then(setS);
@@ -34,6 +36,19 @@ export function SettingsPage() {
       setError(null);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const checkNow = async () => {
+    setChecking(true);
+    setChecked(null);
+    try {
+      const u = await api.checkForUpdate();
+      setChecked(u ? `Clyde ${u.version} is available — install it from the banner above.` : "Clyde is up to date.");
+    } catch (e) {
+      setChecked(`Couldn't check: ${String(e)}`);
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -152,11 +167,22 @@ export function SettingsPage() {
         </p>
       )}
 
-      <Group title="About">
+      <Group title="Updates" footer={checked ?? "Clyde looks for a new version at launch and every 6 hours, and only installs when you click Install."}>
         <GroupRow>
-          <span className="flex-1">Clyde</span>
-          <span className="n-dim tabular-nums">{version}</span>
+          <span className="flex-1">Check for updates automatically</span>
+          <Toggle label="Check for updates" checked={s.check_updates} onChange={(v) => save({ check_updates: v })} />
         </GroupRow>
+        <GroupRow>
+          <span className="flex-1">
+            Clyde <span className="n-dim tabular-nums">{version}</span>
+          </span>
+          <button className="n-plain-button" disabled={checking} onClick={checkNow}>
+            {checking ? "Checking…" : "Check now"}
+          </button>
+        </GroupRow>
+      </Group>
+
+      <Group title="About">
         <GroupRow>
           <span className="n-dim text-[12px] leading-relaxed">
             For personal use. Anthropic's terms don't allow third-party apps to collect or store

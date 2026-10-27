@@ -130,6 +130,12 @@ pub struct AppSnapshot {
     pub active_id: Option<String>,
     /// Email of the active account, for the title bar.
     pub active_email: Option<String>,
+    /// Automatic switching is on.
+    pub auto_switch_enabled: bool,
+    /// The most recent automatic switch.
+    pub last_switch: Option<crate::engine::SwitchEvent>,
+    /// A newer Clyde release, when one is out.
+    pub update: Option<crate::updater::UpdateInfo>,
 }
 
 pub fn now_ms() -> i64 {

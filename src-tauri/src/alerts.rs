@@ -33,7 +33,7 @@ fn limits(s: &UsageSnapshot) -> Vec<(String, f64, Option<i64>)> {
 }
 
 /// "7-day · Fable" → "Fable weekly".
-fn pretty_scoped(label: &str) -> String {
+pub fn pretty_scoped(label: &str) -> String {
     match label.split_once(" · ") {
         Some(("7-day", name)) => format!("{name} weekly"),
         Some(("5-hour", name)) => format!("{name} session"),

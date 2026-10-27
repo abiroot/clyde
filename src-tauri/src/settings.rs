@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::autoswitch::AutoSwitchSettings;
+
 /// Shortcuts offered in Settings. Kept to a short list of combos that don't
 /// collide with common macOS / editor bindings.
 pub const SHORTCUT_CHOICES: &[&str] = &["Alt+Super+C", "Alt+Super+K", "Control+Alt+C", ""];
@@ -24,6 +26,10 @@ pub struct Settings {
     pub menubar_readout: bool,
     /// Global shortcut that opens the popover; empty disables it.
     pub shortcut: String,
+    /// Switch accounts automatically when a limit is reached.
+    pub auto_switch: AutoSwitchSettings,
+    /// Look for new Clyde versions at launch and every few hours.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +41,8 @@ impl Default for Settings {
             alert_all_accounts: false,
             menubar_readout: true,
             shortcut: SHORTCUT_CHOICES[0].to_string(),
+            auto_switch: AutoSwitchSettings::default(),
+            check_updates: true,
         }
     }
 }
@@ -48,6 +56,7 @@ impl Settings {
         if !SHORTCUT_CHOICES.contains(&self.shortcut.as_str()) {
             self.shortcut = SHORTCUT_CHOICES[0].to_string();
         }
+        self.auto_switch = self.auto_switch.normalized();
         self
     }
 }
@@ -66,7 +75,11 @@ pub fn load(data_dir: &Path) -> Settings {
 
 pub fn save(data_dir: &Path, settings: &Settings) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir)?;
-    std::fs::write(path(data_dir), serde_json::to_string_pretty(settings)?)?;
+    // Write-then-rename, so a crash mid-write can't leave half a file that
+    // `load` would silently replace with defaults (losing the auto-switch setup).
+    let tmp = path(data_dir).with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(settings)?)?;
+    std::fs::rename(&tmp, path(data_dir))?;
     Ok(())
 }
 
@@ -80,6 +93,8 @@ mod tests {
         assert!(!s.alerts_enabled);
         assert_eq!(s.alert_thresholds, vec![80, 95]);
         assert!(s.menubar_readout);
+        assert!(!s.auto_switch.enabled);
+        assert!(s.check_updates);
     }
 
     #[test]

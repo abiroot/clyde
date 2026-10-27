@@ -1,6 +1,6 @@
 [package]
 name = "clyde"
-version = "1.0.0"
+version = "1.1.0"
 description = "Multi-account switcher for Claude Code"
 authors = ["Clyde contributors"]
 edition = "2021"
@@ -23,6 +23,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2"
 
 # --- Serialization ---
 serde = { version = "1", features = ["derive"] }

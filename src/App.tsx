@@ -1,22 +1,25 @@
 import { useEffect, useState } from "react";
-import { Activity, Gauge, Globe, Plus, Settings2, TerminalSquare } from "lucide-react";
+import { Activity, ArrowLeftRight, Gauge, Globe, Plus, Settings2, TerminalSquare } from "lucide-react";
 import { api } from "./lib/api";
 import { useSnapshot } from "./lib/useSnapshot";
-import type { OpenChromeStatus } from "./lib/types";
+import type { BrowserStatus } from "./lib/types";
 import { AddAccountDialog } from "./components/AddAccountDialog";
-import { BrowserToolsDialog } from "./components/BrowserToolsDialog";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { AutoSwitchPage } from "./pages/AutoSwitchPage";
+import { BrowserPage } from "./pages/BrowserPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { UsagePage } from "./pages/UsagePage";
 import { SessionsPage } from "./pages/SessionsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { Onboarding } from "./views/Onboarding";
 
-type Page = "overview" | "usage" | "sessions" | "browser" | "settings";
+type Page = "overview" | "usage" | "sessions" | "autoswitch" | "browser" | "settings";
 
 const NAV: { id: Page; label: string; icon: typeof Gauge }[] = [
   { id: "overview", label: "Accounts", icon: Gauge },
   { id: "usage", label: "Usage", icon: Activity },
   { id: "sessions", label: "Sessions", icon: TerminalSquare },
+  { id: "autoswitch", label: "Auto-switch", icon: ArrowLeftRight },
   { id: "browser", label: "Browser tools", icon: Globe },
   { id: "settings", label: "Settings", icon: Settings2 },
 ];
@@ -45,10 +48,10 @@ export default function App() {
     return () => window.removeEventListener("hashchange", on);
   }, []);
   const [showAdd, setShowAdd] = useState(false);
-  const [openChrome, setOpenChrome] = useState<OpenChromeStatus | null>(null);
+  const [browser, setBrowser] = useState<BrowserStatus | null>(null);
 
   useEffect(() => {
-    api.getOpenChrome().then(setOpenChrome).catch(() => setOpenChrome(null));
+    api.getBrowser().then(setBrowser).catch(() => setBrowser(null));
   }, [snapshot?.active_id]);
 
   const current = NAV.find((n) => n.id === page)!;
@@ -82,13 +85,18 @@ export default function App() {
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 pb-8">
+          {snapshot?.update && (
+            <div className="mb-5 max-w-[640px]">
+              <UpdateBanner update={snapshot.update} />
+            </div>
+          )}
           {!snapshot ? null : snapshot.accounts.length === 0 && page === "overview" ? (
             <Onboarding onAdd={() => setShowAdd(true)} />
           ) : page === "overview" ? (
             <OverviewPage
               snapshot={snapshot}
               setSnapshot={setSnapshot}
-              browserReady={!!openChrome?.ready}
+              browserReady={!!browser?.ready}
               onOpenBrowserTools={() => setPage("browser")}
               onAdd={() => setShowAdd(true)}
             />
@@ -96,10 +104,10 @@ export default function App() {
             <UsagePage snapshot={snapshot} />
           ) : page === "sessions" ? (
             <SessionsPage />
+          ) : page === "autoswitch" ? (
+            <AutoSwitchPage snapshot={snapshot} />
           ) : page === "browser" ? (
-            <div className="max-w-[560px]">
-              <BrowserToolsDialog embedded onStatus={setOpenChrome} />
-            </div>
+            <BrowserPage onStatus={setBrowser} />
           ) : (
             <SettingsPage />
           )}

@@ -54,8 +54,10 @@ any stale proxy integration a previous version left in `settings.json`
 | `claude_sync.rs` | Make a Clyde account the active Claude Code account by rewriting its keychain + `.claude.json`. |
 | `import_claude.rs` | Discover & import existing logins from Claude Code config dirs / keychain entries. |
 | `chrome_link.rs` | Which claude.ai account the official Claude-in-Chrome extension is on (explains `/chrome` breaking after a switch). |
-| `open_chrome.rs` | Optional account-independent browser tools (Open Claude in Chrome): pinned download, native host + user-scope MCP registration, status. PolyForm NC — never bundle it. |
-| `settings.rs` | User preferences (alerts, menubar readout, shortcut) as JSON in the app data dir. |
+| `browser.rs` | Optional account-independent browser tools (Playwright MCP + Playwright Extension): Chrome profiles, token read from `Local Storage`, user-scope MCP registration (pinned `MCP_VERSION`), end-to-end test, cleanup of the old Open Claude in Chrome. |
+| `autoswitch.rs` | Pure auto-switch decision: per-account rules, priority, exclusions, switch-back with 5-point headroom, manual hold. |
+| `updater.rs` | Signed self-update (`tauri-plugin-updater`): checks every 6 h, notifies once per version, install + relaunch. Key: `~/.tauri/clyde-updater.key` + repo secrets. |
+| `settings.rs` | User preferences (alerts, menubar readout, shortcut, auto-switch, update checks) as JSON in the app data dir (atomic write). |
 | `history.rs` | Per-poll usage history (`history.jsonl`, 30 days) + least-squares burn-rate forecasts. |
 | `alerts.rs` | Pure: which notifications a new usage reading deserves (threshold crossings, resets). |
 | `sessions.rs` | Running `claude` processes: cwd (`lsof`), uptime, own `CLAUDE_CONFIG_DIR` (`ps -E`). |

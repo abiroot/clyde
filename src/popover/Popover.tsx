@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { api } from "../lib/api";
 import { useSnapshot } from "../lib/useSnapshot";
-import type { AccountView, OpenChromeStatus } from "../lib/types";
+import type { AccountView, BrowserStatus } from "../lib/types";
+import { UpdateBanner } from "../components/UpdateBanner";
 import {
   AccountSummary,
   Avatar,
@@ -26,7 +27,7 @@ const WIDTH = 340;
  */
 export function Popover() {
   const { snapshot, setSnapshot } = useSnapshot();
-  const [browser, setBrowser] = useState<OpenChromeStatus | null>(null);
+  const [browser, setBrowser] = useState<BrowserStatus | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -35,7 +36,7 @@ export function Popover() {
   useEffect(() => {
     const refresh = () => {
       api.getSnapshot().then(setSnapshot).catch(() => {});
-      api.getOpenChrome().then(setBrowser).catch(() => setBrowser(null));
+      api.getBrowser().then(setBrowser).catch(() => setBrowser(null));
     };
     refresh();
     const un = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
@@ -81,6 +82,11 @@ export function Popover() {
 
   return (
     <div ref={root} className="pb-1.5 pt-2">
+      {snapshot?.update && (
+        <div className="px-2.5 pb-2">
+          <UpdateBanner update={snapshot.update} compact />
+        </div>
+      )}
       {!snapshot ? (
         <p className="n-dim px-3.5 py-3">Loading…</p>
       ) : snapshot.accounts.length === 0 ? (
@@ -109,11 +115,13 @@ export function Popover() {
       )}
 
       <div className="n-sep" />
-      <MenuRow onClick={() => invoke("open_main_window")}>
+      <MenuRow onClick={() => invoke("open_main_window", { page: "autoswitch" })}>
+        <span className="flex-1">Auto-switch</span>
+        <span className="n-dim text-[12px]">{snapshot?.auto_switch_enabled ? "On" : "Off"}</span>
+      </MenuRow>
+      <MenuRow onClick={() => invoke("open_main_window", { page: "browser" })}>
         <span className="flex-1">Browser tools</span>
-        <span className="n-dim text-[12px]">
-          {browser?.ready ? (browser.connected ? "Ready" : "Chrome closed") : "Set up…"}
-        </span>
+        <span className="n-dim text-[12px]">{browser?.ready ? "Ready" : "Set up…"}</span>
       </MenuRow>
       <MenuRow onClick={() => invoke("open_main_window")}>
         <span className="flex-1">Open Clyde…</span>

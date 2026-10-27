@@ -9,7 +9,7 @@ use tauri::State;
 
 use crate::engine::SharedCore;
 use crate::model::{now_ms, Account, AppSnapshot, Credential};
-use crate::{chrome_link, claude_sync, import_claude, oauth, open_chrome};
+use crate::{browser, chrome_link, claude_sync, import_claude, oauth};
 
 /// In-flight PKCE logins, keyed by an opaque flow id, holding the verifier until
 /// the user pastes back their authorization code.
@@ -35,44 +35,90 @@ pub fn get_chrome_link(core: State<SharedCore>) -> chrome_link::ChromeLink {
     core.chrome_link()
 }
 
-/// State of the account-independent browser tools (Open Claude in Chrome).
-/// Reads browser preference files and probes a socket, so it's on demand too.
+/// State of the account-independent browser tools (Playwright MCP). Reads
+/// Chrome's profile files and Claude Code's config, so it's on demand too.
 #[tauri::command]
-pub fn get_open_chrome() -> open_chrome::OpenChromeStatus {
-    open_chrome::status()
+pub async fn get_browser() -> browser::BrowserStatus {
+    tauri::async_runtime::spawn_blocking(browser::status)
+        .await
+        .unwrap_or_default()
 }
 
-/// Download (if needed) and wire up Open Claude in Chrome. Runs git/npm, so it
-/// goes off the main thread.
+/// Open the Playwright Extension's Web Store page in a Chrome profile.
 #[tauri::command]
-pub async fn setup_open_chrome() -> CmdResult<open_chrome::OpenChromeStatus> {
-    tauri::async_runtime::spawn_blocking(open_chrome::setup)
+pub fn browser_open_store(profile: String) -> CmdResult<()> {
+    browser::open_store(&profile).map_err(err)
+}
+
+/// Register the browser tools with Claude Code for `profile`. `token` is the
+/// paste fallback; normally Clyde reads it from Chrome itself.
+#[tauri::command]
+pub async fn browser_setup(
+    profile: String,
+    token: Option<String>,
+) -> CmdResult<browser::BrowserStatus> {
+    tauri::async_runtime::spawn_blocking(move || browser::setup(&profile, token))
         .await
         .map_err(err)?
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-pub async fn remove_open_chrome() -> CmdResult<open_chrome::OpenChromeStatus> {
-    tauri::async_runtime::spawn_blocking(open_chrome::remove)
+pub async fn browser_remove() -> CmdResult<browser::BrowserStatus> {
+    tauri::async_runtime::spawn_blocking(browser::remove)
+        .await
+        .map_err(err)?
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Clear out Clyde 1.0's Open Claude in Chrome wiring.
+#[tauri::command]
+pub async fn browser_remove_legacy() -> CmdResult<browser::BrowserStatus> {
+    tauri::async_runtime::spawn_blocking(|| browser::remove_legacy().map(|_| browser::status()))
+        .await
+        .map_err(err)?
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Start the registered server and have it list Chrome's tabs.
+#[tauri::command]
+pub async fn browser_test() -> CmdResult<browser::BrowserTest> {
+    tauri::async_runtime::spawn_blocking(browser::test)
         .await
         .map_err(err)?
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-pub fn set_builtin_chrome(enabled: bool) -> CmdResult<open_chrome::OpenChromeStatus> {
-    open_chrome::set_builtin(enabled).map_err(|e| format!("{e:#}"))
+pub fn set_builtin_chrome(enabled: bool) -> CmdResult<browser::BrowserStatus> {
+    browser::set_builtin(enabled).map_err(|e| format!("{e:#}"))
 }
 
+/// `chrome://extensions` in a profile — where the old unpacked extension goes.
 #[tauri::command]
-pub fn reveal_open_chrome_extension() -> CmdResult<()> {
-    open_chrome::reveal_extension().map_err(err)
+pub fn open_chrome_extensions_page(profile: String) -> CmdResult<()> {
+    browser::open_extensions_page(&profile).map_err(err)
 }
 
+/// Look for a newer Clyde now (Settings → Check for updates).
 #[tauri::command]
-pub fn open_chrome_extensions_page() -> CmdResult<()> {
-    open_chrome::open_extensions_page().map_err(err)
+pub async fn check_for_update(
+    app: tauri::AppHandle,
+    core: State<'_, SharedCore>,
+) -> CmdResult<Option<crate::updater::UpdateInfo>> {
+    let info = crate::updater::check(&app)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    core.set_update(info.clone());
+    Ok(info)
+}
+
+/// Download, verify and install the newer release, then relaunch.
+#[tauri::command]
+pub async fn install_update(app: tauri::AppHandle) -> CmdResult<()> {
+    crate::updater::install(&app)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Put text on the macOS clipboard. `pbcopy` is dependable where the webview's
@@ -152,8 +198,8 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
 
 /// What `set_active_account` returns: the fresh snapshot, plus how many
 /// `claude` sessions were running at switch time so the UI can tell the user
-/// what the switch means for them (new credential within ~30 s; a connected
-/// Chrome browser bridge drops and needs `/chrome` → Reconnect, or a restart).
+/// what the switch means for them (new credential within ~30 s; Claude Code's
+/// own Chrome bridge drops and needs `/chrome` → Reconnect, or a restart).
 #[derive(Serialize)]
 pub struct SwitchOutcome {
     pub snapshot: AppSnapshot,
@@ -169,7 +215,7 @@ pub async fn set_active_account(
     id: String,
 ) -> CmdResult<SwitchOutcome> {
     tracing::info!("set_active_account: {id}");
-    core.set_active(&id).await.map_err(|e| {
+    core.set_active_by_user(&id).await.map_err(|e| {
         tracing::error!("set_active({id}) failed: {e:#}");
         err(e)
     })?;

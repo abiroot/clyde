@@ -33,10 +33,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update bundle; the app checks it against the public key
+          # in tauri.conf.json before installing. Losing this key means
+          # existing installs can't auto-update to builds signed with a new one.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # For signing/notarization, add APPLE_* secrets and they'll be used.
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Clyde ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          # Publishes latest.json, which installed copies poll for updates.
+          includeUpdaterJson: true
           args: --target universal-apple-darwin

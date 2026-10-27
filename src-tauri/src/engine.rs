@@ -11,9 +11,11 @@ use anyhow::{anyhow, Context, Result};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
+use crate::autoswitch::{self, Candidate, Decision, Reason};
 use crate::history::{History, Point};
 use crate::model::*;
 use crate::settings::Settings;
+use crate::updater::UpdateInfo;
 use crate::{alerts, chrome_link, claude_sync, import_claude, oauth, settings, vault};
 
 /// The tray icon's id (see `lib.rs`), for the menubar readout.
@@ -24,6 +26,10 @@ const REFRESH_SKEW_MS: i64 = 60_000;
 
 /// Event name the frontend subscribes to for live state pushes.
 pub const UPDATE_EVENT: &str = "clyde://update";
+
+/// Minimum gap between two automatic switch-backs (ms). Switching away from a
+/// used-up account is never delayed.
+const SWITCH_BACK_GAP_MS: i64 = 3 * 60 * 1000;
 
 pub type SharedCore = Arc<Core>;
 
@@ -36,6 +42,8 @@ pub struct Core {
     data_dir: RwLock<Option<PathBuf>>,
     prefs: RwLock<Settings>,
     history: RwLock<History>,
+    /// A newer Clyde release, once the updater has found one.
+    update: RwLock<Option<UpdateInfo>>,
 }
 
 struct CoreState {
@@ -43,6 +51,24 @@ struct CoreState {
     usage: HashMap<String, UsageSnapshot>,
     usage_errors: HashMap<String, String>,
     active_id: Option<String>,
+    /// The user chose the active account themselves (in Clyde or via
+    /// `claude /login`): auto-switch won't switch *back* from it until it trips.
+    manual_hold: bool,
+    /// The most recent automatic switch, for the UI.
+    last_switch: Option<SwitchEvent>,
+    /// Already told the user every account is used up (once per episode).
+    exhausted_notified: bool,
+}
+
+/// One automatic switch.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SwitchEvent {
+    pub from: String,
+    pub to: String,
+    /// e.g. "Session ≥ 90%", or "back to the preferred account".
+    pub reason: String,
+    /// Unix ms.
+    pub at: i64,
 }
 
 impl Core {
@@ -61,11 +87,15 @@ impl Core {
             data_dir: RwLock::new(None),
             prefs: RwLock::new(Settings::default()),
             history: RwLock::new(History::default()),
+            update: RwLock::new(None),
             state: RwLock::new(CoreState {
                 accounts,
                 usage: HashMap::new(),
                 usage_errors: HashMap::new(),
                 active_id,
+                manual_hold: false,
+                last_switch: None,
+                exhausted_notified: false,
             }),
         }))
     }
@@ -157,6 +187,9 @@ impl Core {
             accounts,
             active_id,
             active_email,
+            auto_switch_enabled: self.prefs.read().unwrap().auto_switch.enabled,
+            last_switch: s.last_switch.clone(),
+            update: self.update.read().unwrap().clone(),
         }
     }
 
@@ -265,6 +298,153 @@ impl Core {
         }
         self.emit();
         Ok(())
+    }
+
+    /// A switch the user asked for. Auto-switch respects it: it won't switch
+    /// back to a higher-priority account until this one trips.
+    pub async fn set_active_by_user(&self, id: &str) -> Result<()> {
+        self.set_active(id).await?;
+        let mut s = self.state.write().unwrap();
+        s.manual_hold = true;
+        s.exhausted_notified = false;
+        Ok(())
+    }
+
+    // ---- auto-switch ------------------------------------------------------
+
+    /// After a poll: switch accounts if the rules say so.
+    async fn auto_switch(&self) {
+        let cfg = self.settings().auto_switch;
+        if !cfg.enabled {
+            return;
+        }
+        let (decision, active, names) = {
+            let s = self.state.read().unwrap();
+            let candidates: Vec<Candidate> = s
+                .accounts
+                .iter()
+                .map(|a| Candidate {
+                    id: &a.id,
+                    usage: s
+                        .usage
+                        .get(&a.id)
+                        .filter(|_| !s.usage_errors.contains_key(&a.id)),
+                    healthy: !s
+                        .usage_errors
+                        .get(&a.id)
+                        .is_some_and(|e| e.contains("refresh") || e.contains("Signed out")),
+                })
+                .collect();
+            let decision = autoswitch::decide(
+                &cfg,
+                s.active_id.as_deref(),
+                &candidates,
+                s.manual_hold,
+                now_ms(),
+            );
+            let names: HashMap<String, String> = s
+                .accounts
+                .iter()
+                .map(|a| {
+                    (
+                        a.id.clone(),
+                        a.email.clone().unwrap_or_else(|| a.label.clone()),
+                    )
+                })
+                .collect();
+            (decision, s.active_id.clone(), names)
+        };
+        let Some(from) = active else { return };
+        let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_string());
+
+        match decision {
+            Decision::Stay => {
+                self.state.write().unwrap().exhausted_notified = false;
+            }
+            Decision::Exhausted { reason } => {
+                let first =
+                    !std::mem::replace(&mut self.state.write().unwrap().exhausted_notified, true);
+                if first && cfg.notify {
+                    self.notify(
+                        "No account has room left",
+                        &format!(
+                            "{}: {reason}. Clyde switches as soon as another account can take over.",
+                            name(&from)
+                        ),
+                    );
+                }
+            }
+            Decision::Switch { to, reason } => {
+                let back = reason == Reason::SwitchBack;
+                if back {
+                    let recent = self
+                        .state
+                        .read()
+                        .unwrap()
+                        .last_switch
+                        .as_ref()
+                        .is_some_and(|e| now_ms() - e.at < SWITCH_BACK_GAP_MS);
+                    if recent {
+                        return;
+                    }
+                }
+                let why = match &reason {
+                    Reason::Tripped(r) => r.clone(),
+                    Reason::SwitchBack => "back to the preferred account".to_string(),
+                };
+                if let Err(e) = self.set_active(&to).await {
+                    tracing::warn!("auto-switch to {to} failed: {e:#}");
+                    return;
+                }
+                tracing::info!("auto-switched {from} → {to} ({why})");
+                {
+                    let mut s = self.state.write().unwrap();
+                    s.manual_hold = false;
+                    s.exhausted_notified = false;
+                    s.last_switch = Some(SwitchEvent {
+                        from: from.clone(),
+                        to: to.clone(),
+                        reason: why.clone(),
+                        at: now_ms(),
+                    });
+                }
+                if cfg.notify {
+                    let (title, body) = if back {
+                        (
+                            format!("Back on {}", name(&to)),
+                            "Its limits have room again.".to_string(),
+                        )
+                    } else {
+                        (
+                            format!("Switched to {}", name(&to)),
+                            format!("{}: {why}", name(&from)),
+                        )
+                    };
+                    self.notify(&title, &body);
+                }
+                self.update_tray_readout();
+                self.emit();
+            }
+        }
+    }
+
+    // ---- updates ----------------------------------------------------------
+
+    /// Record a newer release (or none) and tell the UI. Returns whether this
+    /// version is news, so the caller notifies only once per version.
+    pub fn set_update(&self, info: Option<UpdateInfo>) -> bool {
+        let new = {
+            let mut u = self.update.write().unwrap();
+            let new = match (&*u, &info) {
+                (Some(old), Some(i)) => old.version != i.version,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            *u = info;
+            new
+        };
+        self.emit();
+        new
     }
 
     /// Which account the Claude-in-Chrome extension is signed into, and whether
@@ -570,6 +750,8 @@ impl Core {
                 let mut s = self.state.write().unwrap();
                 if s.active_id.as_deref() != Some(id.as_str()) {
                     s.active_id = Some(id);
+                    // Switched outside Clyde (`claude /login`): a choice to respect.
+                    s.manual_hold = true;
                     true
                 } else {
                     false
@@ -595,6 +777,8 @@ impl Core {
         // The backfill may have just learned the active account's uuid, which
         // startup didn't have to write into Claude Code's config.
         self.repair_active_identity();
+
+        self.auto_switch().await;
     }
 
     /// Fill in `oauthAccount.accountUuid` for accounts stored before Clyde

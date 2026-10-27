@@ -73,12 +73,16 @@ already manages, one click switches to it and browser tools work again without
 touching Chrome at all.
 
 **Browser tools for every account (optional).** Clyde can instead set up
-[Open Claude in Chrome](https://github.com/noemica-io/open-claude-in-chrome), an
-open-source extension that reaches Chrome over a local socket with no account
-attached, so browser tools keep working through every switch. Clyde downloads it
-from upstream (pinned to a reviewed commit), installs its helper, and registers it
-with Claude Code; you load the extension once from `chrome://extensions`. See
-[Browser tools](#browser-tools-open-claude-in-chrome) below.
+[Playwright MCP](https://github.com/microsoft/playwright-mcp) with Microsoft's
+Playwright Extension, which reaches Chrome over a local connection with no
+account attached, so browser tools keep working through every switch. You
+install the extension from the Chrome Web Store; Clyde reads its connection
+token from Chrome and registers the server with Claude Code. See
+[Browser tools](#browser-tools) below.
+
+**Auto-switch (optional).** Clyde can move Claude Code to another account by
+itself when the active one reaches a limit — and back once your preferred
+account resets. See [Auto-switch](#auto-switch) below.
 
 > Full design notes in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -114,51 +118,71 @@ npm run tauri build    # produce a .app / installer
 3. **Use `claude` as normal.** Watch the gauges and switch whenever an account is
    running hot. (New `claude` runs switch immediately; running sessions follow
    within ~30 seconds. If you use `/chrome`, keep the browser signed into the
-   same account — Clyde flags it when they drift apart, or set up the
-   account-independent browser tools below.)
+   same account — Clyde flags it when they drift apart — or set up the
+   account-independent browser tools below.) Or let [Auto-switch](#auto-switch)
+   do the switching.
 
-## Browser tools (Open Claude in Chrome)
+## Auto-switch
 
-Optional. Open it from **Make browser tools work for every account** on the
-dashboard. Requires Node.js.
+Off by default; turn it on in the **Auto-switch** page.
 
-1. **Set up** — Clyde clones the project to `~/Projects/Vendor/open-claude-in-chrome`
-   at the commit it was reviewed against, installs the helper's dependencies
-   (`npm ci --ignore-scripts`), registers the native messaging host for Chrome,
-   Edge and Brave, and adds a user-scope MCP server named `open-claude-in-chrome`.
-2. **Load it in Chrome** — `chrome://extensions` → Developer mode → Load unpacked →
-   the `extension` folder. Clyde predicts the id Chrome assigns and confirms it.
-3. **Restart Chrome.** The checklist ticks itself off.
+- **Rules.** A rule says which limit to watch (any limit, the 5-hour session,
+  the weekly limit, or a per-model cap such as Fable's weekly one) and at what
+  percentage to move on; 100% means "only when it's full". One default rule
+  applies to every account, and any account can have its own instead.
+- **Priority.** Drag accounts into the order you want them used. Clyde always
+  uses the highest account that still has room: when the active account trips
+  its rule, it moves to the next one; when a preferred account resets, it moves
+  back (switch-back can be turned off). An account needs 5 points of room under
+  its threshold before Clyde moves to it, so a limit hovering at the line can't
+  make it flap.
+- **Never switch to.** Excluded accounts are skipped. You can still pick one by
+  hand; Clyde then stays on it until it trips.
+- **Your choice wins.** After you switch by hand (in Clyde, or `claude /login`),
+  Clyde won't switch back from that account until it runs out.
+- A switch is announced with a notification. When no account has room, Clyde
+  says so once and waits. Usage is checked every 2 minutes; running `claude`
+  sessions follow a switch within ~30 seconds.
 
-New `claude` sessions then have `mcp__open-claude-in-chrome__*` tools, whichever
-account is active. Things to know before you turn it on:
+## Browser tools
 
-- **Licence.** Open Claude in Chrome is licensed **PolyForm Noncommercial 1.0.0**
-  (its README says MIT; the LICENSE file governs). Clyde never ships its code — it
-  downloads it onto your machine — and whether your use is noncommercial is yours
-  to judge.
-- **No site blocklist.** The official extension refuses banking, crypto, payment
-  and some other sites; this one doesn't. Load it in a Chrome profile that isn't
-  signed into anything you wouldn't hand to an agent, and in one profile only.
-- **Unreviewed updates.** Clyde flags the copy if it's moved off the reviewed
-  commit (e.g. after a manual `git pull`).
-- Mouse and keyboard actions use Chrome's debugger API, which Chrome blocks on
-  pages where another extension has injected a frame; reading and navigating
-  still work there.
-- **Remove** in the same dialog unregisters the MCP server and the native host.
+Optional. Open **Browser tools** in the sidebar. Requires Node.js (`npx`).
+
+1. **Pick a Chrome profile** — one that isn't signed into banking, crypto or
+   payment sites: the agent can use whatever that profile is logged into.
+2. **Install the Playwright Extension** — Clyde opens its Web Store page in that
+   profile.
+3. **Connect** — Clyde reads the extension's connection token from the profile's
+   storage (or takes a pasted one) and registers a user-scope MCP server named
+   `playwright` (`npx @playwright/mcp@<pinned> --extension --profile-dir-name …`).
+
+New `claude` sessions then have `mcp__playwright__*` tools, whichever account is
+active. **Test connection** starts the registered server and has it list
+Chrome's tabs. Each session gets its own Chrome tab group and only sees the tabs
+in it; Chrome shows a "started debugging this browser" bar while one is
+connected. Clyde 1.0's Open Claude in Chrome is cleaned up automatically on
+setup (remove its unpacked extension from `chrome://extensions` yourself).
+
+## Updates
+
+Clyde checks GitHub for a new release at launch and every 6 hours, notifies
+you once per version, and shows **Install & restart** in the window and the
+menubar popover. Updates are signed; Clyde verifies the signature against the
+public key it ships with before replacing itself. Turn checks off in Settings.
 
 ## Security
 
-- Browser tools (optional) run a third-party extension with access to every site
-  in the Chrome profile it's loaded into — see
-  [Browser tools](#browser-tools-open-claude-in-chrome) for the precautions.
+- Browser tools (optional) give agents the Chrome profile you connect, with
+  every site it's signed into — see [Browser tools](#browser-tools).
 
 - Credentials live only in the OS-native secret store (macOS Keychain / Windows
   Credential Manager / Linux Secret Service) via the `keyring` crate.
 - Clyde's only outbound calls are to Anthropic: `api.anthropic.com` (usage +
   profile) and `platform.claude.com` (OAuth token exchange / refresh). Browser
-  sign-in opens `claude.com` in *your* browser, not from Clyde. There is no
-  telemetry, no Clyde server, and no listening socket.
+  sign-in opens `claude.com` in *your* browser, not from Clyde. Update checks
+  read `latest.json` from this repo's GitHub releases. **Test connection** runs
+  `npx @playwright/mcp`, which npm fetches on first use. There is no telemetry,
+  no Clyde server, and no listening socket.
 
 See [`SECURITY.md`](SECURITY.md) to report issues.
 

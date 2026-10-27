@@ -45,7 +45,9 @@ account — whether or not Clyde is running.
 | `claude_sync.rs` | Make a Clyde account the active Claude Code account by rewriting its keychain entry + `.claude.json`. Also self-heals stale legacy proxy integrations. |
 | `import_claude.rs` | Discover and import existing logins from Claude Code's own config dirs / keychain entries. |
 | `chrome_link.rs` | Read which claude.ai account the Claude-in-Chrome extension is signed into, so the UI can explain why `/chrome` stopped working after a switch. |
-| `open_chrome.rs` | Optional account-independent browser tools: download Open Claude in Chrome (pinned), register its native host + a user-scope MCP server, and report setup status. |
+| `browser.rs` | Optional account-independent browser tools: find Chrome profiles carrying the Playwright Extension, read its connection token, register Playwright MCP at user scope, and test the connection end to end. |
+| `autoswitch.rs` | Pure decision for automatic switching: rules, priority, exclusions, switch-back with headroom. |
+| `updater.rs` | Signed self-updates: background checks against GitHub releases, one-click install + relaunch. |
 | `commands.rs` | Tauri commands exposed to the UI (the only Rust↔JS surface). |
 | `lib.rs` | App wiring: plugins, tray, window behavior, the usage-poll loop. |
 
@@ -91,42 +93,55 @@ to it.
 
 ### Account-independent browser tools
 
-`open_chrome.rs` sidesteps the rendezvous rather than fighting it. Open Claude in
-Chrome (PolyForm Noncommercial — downloaded from upstream, never bundled) is an
-MCP server that talks to its extension through a native messaging host over a
-unix socket in a `0700` directory under `$TMPDIR`. Nothing on that path carries an
-account. It is registered once at **user scope** in Claude Code's global config
-(via `claude mcp add --scope user`), and `write_identity` preserves every key it
-doesn't own, so `mcpServers` survives each switch untouched.
+`browser.rs` sidesteps the rendezvous rather than fighting it. Microsoft's
+Playwright MCP, run with `--extension`, connects to its "Playwright Extension"
+(Web Store id `mmlmfjhmonkocbjadbfplnigmagldckm`) locally and authenticates with
+a per-profile token; nothing on that path carries a Claude account. It is
+registered once at **user scope** in Claude Code's global config (via
+`claude mcp add --scope user`, with the token in the server's env so Chrome's
+approval dialog is skipped), and `write_identity` preserves every key it doesn't
+own, so `mcpServers` survives each switch untouched.
 
-Setup is idempotent: clone at `PINNED_COMMIT` (and refuse to wire up anything
-else), `npm ci --ignore-scripts` in `host/`, write a wrapper that pins the
-absolute `node` path (Chrome launches native hosts with a bare environment), and
-write `com.anthropic.open_claude_in_chrome.json` for each installed Chromium
-browser. The unpacked extension's id is predicted as Chromium does it —
-SHA-256 of the realpath, first 16 bytes, nibbles mapped to `a..p` — and then read
-back from each profile's `Secure Preferences`; re-running setup rewrites the
-manifest's `allowed_origins` if the two ever differ. Status is read on demand:
-preference files, the MCP entry, and a probe of the socket.
+The extension keeps its token in its own page's `localStorage` (`auth-token`),
+i.e. in the profile's `Local Storage/leveldb`. Clyde finds it with a byte scan of
+the `.log`/`.ldb` files (newest first), which covers the uncompressed records
+Chrome writes; the UI falls back to a pasted token when that fails. Status
+compares the registered token with the profile's current one, so a reinstalled
+extension shows up as "Reconnect" instead of silently failing. **Test
+connection** spawns the registered command with its env, speaks just enough MCP
+over stdio (`initialize`, then `tools/call browser_tabs list`), and reports what
+Chrome answered.
 
-`engine::Core::set_active` wraps this: it first refreshes the account's token if
-stale (so Claude Code gets a non-expired bearer), calls `activate`, then records
-the new active id and pushes a fresh snapshot to the UI. There is no automatic
-routing or failover — the user picks the active account; the gauges exist to inform
-that choice.
+The package version is pinned (`MCP_VERSION`) so sessions never run an untried
+release. Setup also removes Clyde 1.0's Open Claude in Chrome wiring (its MCP
+entry and native-host manifests).
 
-Clyde always targets the user's *default* `claude` (the `~/.claude` config dir /
-unsuffixed keychain service), regardless of any `CLAUDE_CONFIG_DIR` the Clyde
-process itself may have inherited.
+## Auto-switch
 
-On startup, `detect_active` reconciles Clyde's idea of the active account with
-whichever one Claude Code's keychain actually holds (matched by token lineage,
-falling back to the identity in `~/.claude/.claude.json`; if neither matches a
-stored account, none is claimed active), and
-`cleanup_legacy_integration` strips any dead proxy keys (a throwaway `apiKeyHelper`
-and a localhost `ANTHROPIC_BASE_URL`) that an older Clyde version may have left in
-`settings.json`.
+`autoswitch::decide` is pure: given the settings, the active id, each account's
+latest usage and login health, and whether the user is holding the current
+account, it returns `Stay`, `Switch { to, reason }` or `Exhausted`. The engine
+calls it after every poll (`Core::auto_switch`) and switches through the same
+`set_active` path as a click.
 
+- An account *trips* when its rule's limit is ≥ the threshold, or Anthropic
+  reports it `rejected`. Readings older than 10 minutes, or from an account whose
+  usage read failed, are never acted on.
+- Moving *to* an account needs `HEADROOM` (5) points under its own threshold.
+- Switch-back (to a higher-priority account) is skipped while `manual_hold` is
+  set — a click in Clyde or an outside `claude /login` sets it; an automatic
+  switch clears it — and never runs within 3 minutes of the last switch.
+
+## Updates
+
+`tauri-plugin-updater` with a minisign key: the private key and its password
+are the `TAURI_SIGNING_PRIVATE_KEY*` repo secrets (kept locally in
+`~/.tauri/clyde-updater.key`, password in the login Keychain under
+`clyde-updater-signing-password`), the public key is in `tauri.conf.json`.
+`release.yml` builds the signed `.app.tar.gz` and `latest.json`; the endpoint is
+`releases/latest/download/latest.json`, so a release only reaches users once it
+is published (not while it's a draft). **Losing the private key strands every
+installed copy** — they would need a manual reinstall to trust a new key.
 ## Live usage
 
 So the gauges fill even when no traffic is flowing, `Core::poll_usage` runs on a

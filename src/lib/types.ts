@@ -60,6 +60,8 @@ export interface Settings {
   menubar_readout: boolean;
   /** Empty string = no shortcut. */
   shortcut: string;
+  auto_switch: AutoSwitchSettings;
+  check_updates: boolean;
 }
 
 export interface AppSnapshot {
@@ -68,14 +70,19 @@ export interface AppSnapshot {
   active_id: string | null;
   /** Email of the active account, for the title bar. */
   active_email: string | null;
+  auto_switch_enabled: boolean;
+  /** The most recent automatic switch. */
+  last_switch: SwitchEvent | null;
+  /** A newer Clyde release, when one is out. */
+  update: UpdateInfo | null;
 }
 
 export interface SwitchOutcome {
   snapshot: AppSnapshot;
   /**
    * Running `claude` processes at switch time. They adopt the new account
-   * within ~30 s; a connected Chrome browser bridge drops on the account
-   * change and needs `/chrome` → Reconnect extension (or a restart).
+   * within ~30 s; Claude Code's own Chrome bridge drops on the account change
+   * (the Playwright browser tools don't).
    */
   running_sessions: number;
 }
@@ -105,33 +112,84 @@ export interface ChromeLink {
   matched: boolean;
 }
 
+/** One Chrome profile, as the browser-tools setup lists it. */
+export interface ChromeProfile {
+  /** Directory name, e.g. "Default" or "Profile 2". */
+  dir: string;
+  name: string;
+  /** The Google account signed into it. */
+  email: string | null;
+  /** The Playwright Extension is installed in it. */
+  has_extension: boolean;
+  /** Clyde could read the extension's connection token from it. */
+  token_found: boolean;
+}
+
 /**
- * Account-independent browser tools (Open Claude in Chrome). It reaches Chrome
- * over a local socket instead of the per-account cloud pairing, so once every
- * step is wired, switching accounts can't break the browser.
+ * Account-independent browser tools (Playwright MCP + the Playwright
+ * Extension). The extension accepts a local connection authenticated by a
+ * per-profile token, so switching accounts can't break it.
  */
-export interface OpenChromeStatus {
-  repo_path: string;
-  downloaded: boolean;
-  commit: string | null;
-  /** The downloaded code is the version Clyde reviewed. */
-  reviewed: boolean;
-  deps_installed: boolean;
-  node_path: string | null;
-  /** The folder to pick in Chrome's "Load unpacked". */
-  extension_dir: string;
-  expected_extension_id: string | null;
-  /** Browser profiles that loaded it, e.g. "Chrome — Default". */
-  loaded_in: string[];
-  loaded_ids: string[];
-  host_registered: boolean;
+export interface BrowserStatus {
+  node_found: boolean;
+  profiles: ChromeProfile[];
+  /** The profile the registered server connects to. */
+  profile: string | null;
   mcp_registered: boolean;
-  /** The native host is running, i.e. the extension is live in a browser. */
-  connected: boolean;
+  token_set: boolean;
+  /** The extension was reinstalled since setup; its token changed. */
+  token_stale: boolean;
+  registered_version: string | null;
+  pinned_version: string;
   /** Claude Code's own account-bound Chrome integration is on. */
   builtin_enabled: boolean;
-  /** Every piece is wired. */
+  /** Clyde 1.0's Open Claude in Chrome is still wired up. */
+  legacy_present: boolean;
   ready: boolean;
+}
+
+export interface BrowserTest {
+  ok: boolean;
+  detail: string;
+}
+
+/** When an account counts as used up. */
+export interface Rule {
+  /** "any" | "session" | "weekly" | a model cap's label, e.g. "7-day · Fable". */
+  limit: string;
+  /** 1..100; 100 = only when full. */
+  at: number;
+}
+
+export interface AccountPolicy {
+  /** Never switch to this account automatically. */
+  exclude: boolean;
+  /** Replaces the default rule. */
+  rule: Rule | null;
+}
+
+export interface AutoSwitchSettings {
+  enabled: boolean;
+  default_rule: Rule;
+  /** Account ids, most preferred first. */
+  priority: string[];
+  accounts: Record<string, AccountPolicy>;
+  switch_back: boolean;
+  notify: boolean;
+}
+
+export interface SwitchEvent {
+  from: string;
+  to: string;
+  reason: string;
+  /** Unix ms. */
+  at: number;
+}
+
+export interface UpdateInfo {
+  version: string;
+  current: string;
+  notes: string | null;
 }
 
 export interface LoginStart {

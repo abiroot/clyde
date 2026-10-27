@@ -1,6 +1,8 @@
 //! Clyde — multi-account switcher for Claude Code.
 
 mod alerts;
+mod autoswitch;
+mod browser;
 mod chrome_link;
 mod claude_sync;
 mod commands;
@@ -9,9 +11,9 @@ mod history;
 mod import_claude;
 mod model;
 mod oauth;
-mod open_chrome;
 mod sessions;
 mod settings;
+mod updater;
 mod usage;
 mod vault;
 
@@ -42,6 +44,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -60,12 +63,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
             commands::get_chrome_link,
-            commands::get_open_chrome,
-            commands::setup_open_chrome,
-            commands::remove_open_chrome,
+            commands::get_browser,
+            commands::browser_open_store,
+            commands::browser_setup,
+            commands::browser_remove,
+            commands::browser_remove_legacy,
+            commands::browser_test,
             commands::set_builtin_chrome,
-            commands::reveal_open_chrome_extension,
             commands::open_chrome_extensions_page,
+            commands::check_for_update,
+            commands::install_update,
             open_main_window,
             quit_app,
             js_log,
@@ -107,6 +114,8 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(120)).await;
                 }
             });
+
+            updater::spawn_background_checks(app.handle().clone(), core.clone());
 
             build_tray(app)?;
             core.update_tray_readout();
@@ -259,13 +268,18 @@ fn toggle_popover(app: &tauri::AppHandle, tray: Rect) {
     let _ = pop.set_focus();
 }
 
-/// "Open Clyde" from the popover: bring up the full window.
+/// "Open Clyde" from the popover: bring up the full window, optionally on a
+/// page (`"autoswitch"`, `"browser"`, …).
 #[tauri::command]
-fn open_main_window(app: tauri::AppHandle) {
+fn open_main_window(app: tauri::AppHandle, page: Option<String>) {
     if let Some(pop) = app.get_webview_window(POPOVER) {
         let _ = pop.hide();
     }
     show_main(&app);
+    if let (Some(page), Some(main)) = (page, app.get_webview_window("main")) {
+        let page: String = page.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        let _ = main.eval(format!("window.location.hash = '{page}'"));
+    }
 }
 
 /// Frontend errors, forwarded to the Rust log (the webview console isn't

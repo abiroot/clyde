@@ -5,7 +5,9 @@ import type {
   Discovered,
   HistoryPoint,
   LoginStart,
-  OpenChromeStatus,
+  BrowserStatus,
+  BrowserTest,
+  UpdateInfo,
   Session,
   Settings,
   SwitchOutcome,
@@ -16,7 +18,28 @@ export const api = {
 
   getChromeLink: () => invoke<ChromeLink>("get_chrome_link"),
 
-  getOpenChrome: () => invoke<OpenChromeStatus>("get_open_chrome"),
+  getBrowser: () => invoke<BrowserStatus>("get_browser"),
+
+  browserOpenStore: (profile: string) => invoke<void>("browser_open_store", { profile }),
+
+  browserSetup: (profile: string, token: string | null) =>
+    invoke<BrowserStatus>("browser_setup", { profile, token }),
+
+  browserRemove: () => invoke<BrowserStatus>("browser_remove"),
+
+  browserRemoveLegacy: () => invoke<BrowserStatus>("browser_remove_legacy"),
+
+  browserTest: () => invoke<BrowserTest>("browser_test"),
+
+  setBuiltinChrome: (enabled: boolean) =>
+    invoke<BrowserStatus>("set_builtin_chrome", { enabled }),
+
+  openChromeExtensionsPage: (profile: string) =>
+    invoke<void>("open_chrome_extensions_page", { profile }),
+
+  checkForUpdate: () => invoke<UpdateInfo | null>("check_for_update"),
+
+  installUpdate: () => invoke<void>("install_update"),
 
   copyText: (text: string) => invoke<void>("copy_text", { text }),
 
@@ -34,17 +57,6 @@ export const api = {
   getAutostart: () => invoke<boolean>("get_autostart"),
 
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
-
-  setupOpenChrome: () => invoke<OpenChromeStatus>("setup_open_chrome"),
-
-  removeOpenChrome: () => invoke<OpenChromeStatus>("remove_open_chrome"),
-
-  setBuiltinChrome: (enabled: boolean) =>
-    invoke<OpenChromeStatus>("set_builtin_chrome", { enabled }),
-
-  revealOpenChromeExtension: () => invoke<void>("reveal_open_chrome_extension"),
-
-  openChromeExtensionsPage: () => invoke<void>("open_chrome_extensions_page"),
 
   discoverClaudeAccounts: () =>
     invoke<Discovered[]>("discover_claude_accounts"),
