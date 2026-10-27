@@ -243,7 +243,7 @@ pub fn read_token(profile_dir: &Path) -> Option<String> {
         })
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
     files
         .iter()
         .find_map(|(_, p)| token_in_bytes(&std::fs::read(p).ok()?))
