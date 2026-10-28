@@ -21,7 +21,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Tab = "claude" | "browser" | "new" | "token" | "kimi";
+type Tab = "claude" | "browser" | "new" | "token" | "providers";
 
 export function AddAccountDialog({ onDone, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("claude");
@@ -54,8 +54,8 @@ export function AddAccountDialog({ onDone, onClose }: Props) {
           <TabButton active={tab === "token"} onClick={() => setTab("token")}>
             <ClipboardPaste size={14} /> Token
           </TabButton>
-          <TabButton active={tab === "kimi"} onClick={() => setTab("kimi")}>
-            <KeyRound size={14} /> Kimi
+          <TabButton active={tab === "providers"} onClick={() => setTab("providers")}>
+            <KeyRound size={14} /> Kimi…
           </TabButton>
         </div>
 
@@ -72,8 +72,8 @@ export function AddAccountDialog({ onDone, onClose }: Props) {
           {tab === "token" && (
             <TokenTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
           )}
-          {tab === "kimi" && (
-            <KimiTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+          {tab === "providers" && (
+            <ProvidersTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
           )}
 
           {error && (
@@ -475,16 +475,39 @@ function TokenTab({ busy, setBusy, setError, onDone }: TabProps) {
   );
 }
 
-/** Kimi Code: no sign-in to borrow, just the key from its console. The key is
- *  checked with Kimi, then kept in the Keychain. */
-function KimiTab({ busy, setBusy, setError, onDone }: TabProps) {
+const PROVIDERS = {
+  kimi: {
+    name: "Kimi",
+    about:
+      "Use your Kimi Code membership (Plus or higher) in Claude Code. Create a key in the Kimi Code console and paste it here. Usage counts against your plan, not per token.",
+    console: "https://www.kimi.com/code/console",
+    consoleLabel: "Open the Kimi Code console",
+    keyLabel: "Kimi Code key",
+    placeholder: "sk-kimi-…",
+  },
+  refuseless: {
+    name: "Refuseless",
+    about:
+      "Use Refuseless's open models (GLM, DeepSeek, MiniMax) in Claude Code. Paste an API key from your Refuseless account. Billed per token from your credit balance, so auto-switch leaves it out unless you add it.",
+    console: "https://refuseless.com",
+    consoleLabel: "Open Refuseless",
+    keyLabel: "Refuseless API key",
+    placeholder: "abl_…",
+  },
+} as const;
+
+/** Model providers: no sign-in to borrow, just a key from the provider's
+ *  console. The key is checked with the provider, then kept in the Keychain. */
+function ProvidersTab({ busy, setBusy, setError, onDone }: TabProps) {
+  const [provider, setProvider] = useState<keyof typeof PROVIDERS>("kimi");
   const [key, setKey] = useState("");
+  const p = PROVIDERS[provider];
 
   const submit = async () => {
     setError(null);
     setBusy(true);
     try {
-      onDone(await api.connectKimi(key.trim()));
+      onDone(await api.connectProvider(provider, key.trim()));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -494,23 +517,37 @@ function KimiTab({ busy, setBusy, setError, onDone }: TabProps) {
 
   return (
     <>
+      <div className="n-segmented" role="tablist">
+        {(Object.keys(PROVIDERS) as (keyof typeof PROVIDERS)[]).map((id) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={provider === id}
+            onClick={() => {
+              setProvider(id);
+              setKey("");
+              setError(null);
+            }}
+          >
+            {PROVIDERS[id].name}
+          </button>
+        ))}
+      </div>
       <p className="text-xs leading-relaxed text-[var(--color-ink-soft)]">
-        Use your Kimi Code membership (Plus or higher) in Claude Code. Create a key in the Kimi Code console and
-        paste it here. Usage counts against your plan, not per token. Switching to Kimi keeps your skills, MCP
-        servers and memory; it only changes the model behind Claude Code.
+        {p.about} Switching keeps your skills, MCP servers and memory; it only changes the model behind Claude Code.
       </p>
       <button
-        onClick={() => openUrl("https://www.kimi.com/code/console")}
+        onClick={() => openUrl(p.console)}
         className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium hover:bg-white/5"
       >
-        <Globe size={13} /> Open the Kimi Code console
+        <Globe size={13} /> {p.consoleLabel}
       </button>
-      <Field label="Kimi Code key">
+      <Field label={p.keyLabel}>
         <input
           type="password"
           value={key}
           onChange={(e) => setKey(e.target.value)}
-          placeholder="sk-kimi-…"
+          placeholder={p.placeholder}
           spellCheck={false}
           autoComplete="off"
           className="w-full rounded-lg bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-[var(--color-clay)]/50"
@@ -521,7 +558,7 @@ function KimiTab({ busy, setBusy, setError, onDone }: TabProps) {
         onClick={submit}
         className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-40"
       >
-        {busy ? "Checking with Kimi…" : "Connect Kimi"}
+        {busy ? `Checking with ${p.name}…` : `Connect ${p.name}`}
       </button>
     </>
   );

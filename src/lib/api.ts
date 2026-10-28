@@ -8,8 +8,10 @@ import type {
   BrowserStatus,
   BrowserTest,
   UpdateInfo,
+  RoutingView,
   Session,
   Settings,
+  Target,
   SwitchOutcome,
 } from "./types";
 
@@ -69,7 +71,18 @@ export const api = {
   setActiveAccount: (id: string) =>
     invoke<SwitchOutcome>("set_active_account", { id }),
 
-  connectKimi: (key: string) => invoke<AppSnapshot>("connect_kimi", { key }),
+  connectProvider: (provider: "kimi" | "refuseless", key: string) =>
+    invoke<AppSnapshot>("connect_provider", { provider, key }),
+
+  setProviderModel: (provider: string, model: string) =>
+    invoke<AppSnapshot>("set_provider_model", { provider, model }),
+
+  getRouting: () => invoke<RoutingView>("get_routing"),
+
+  setFolderPin: (folder: string, target: Target | null) =>
+    invoke<RoutingView>("set_folder_pin", { folder, target }),
+
+  installCommands: () => invoke<RoutingView>("install_commands"),
 
   renameAccount: (id: string, label: string) =>
     invoke<AppSnapshot>("rename_account", { id, label }),

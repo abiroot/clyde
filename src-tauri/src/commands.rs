@@ -9,6 +9,8 @@ use tauri::State;
 
 use crate::engine::SharedCore;
 use crate::model::{now_ms, Account, AppSnapshot, Credential};
+use crate::provider::Provider;
+use crate::routing::{self, Target};
 use crate::{browser, chrome_link, claude_sync, import_claude, oauth};
 
 /// In-flight PKCE logins, keyed by an opaque flow id, holding the verifier until
@@ -226,13 +228,88 @@ pub async fn set_active_account(
     })
 }
 
-/// Connect Kimi Code with a key from its console (checked with Kimi first).
+/// Connect a provider (`kimi`, `refuseless`) with a key from its console
+/// (checked with the provider first).
 #[tauri::command]
-pub async fn connect_kimi(core: State<'_, SharedCore>, key: String) -> CmdResult<AppSnapshot> {
-    core.connect_kimi(&key)
+pub async fn connect_provider(
+    core: State<'_, SharedCore>,
+    provider: String,
+    key: String,
+) -> CmdResult<AppSnapshot> {
+    let p = Provider::from_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
+    core.connect_provider(p, &key)
         .await
         .map_err(|e| format!("{e:#}"))?;
     Ok(core.snapshot())
+}
+
+/// Choose the model a provider's sessions use. Sessions on that provider
+/// follow within seconds.
+#[tauri::command]
+pub fn set_provider_model(
+    core: State<SharedCore>,
+    provider: String,
+    model: String,
+) -> CmdResult<AppSnapshot> {
+    let p = Provider::from_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
+    core.set_provider_model(p, &model)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(core.snapshot())
+}
+
+/// Per-folder pins and the launch commands, for the Sessions page.
+#[derive(Serialize)]
+pub struct RoutingView {
+    /// Folder → "claude" | "kimi" | "refuseless".
+    pub folder_pins: std::collections::BTreeMap<String, Target>,
+    /// The `claude-<target>` commands are installed in `~/.local/bin`.
+    pub commands_installed: bool,
+    /// Where each launch pin's `--settings` file is.
+    pub launch_files: std::collections::BTreeMap<Target, String>,
+}
+
+fn routing_view(core: &SharedCore) -> RoutingView {
+    RoutingView {
+        folder_pins: core.folder_pins(),
+        commands_installed: routing::commands_installed(),
+        launch_files: Target::ALL
+            .into_iter()
+            .filter_map(|t| {
+                let f = routing::launch_file(t).ok()?;
+                f.exists().then(|| (t, f.display().to_string()))
+            })
+            .collect(),
+    }
+}
+
+#[tauri::command]
+pub fn get_routing(core: State<SharedCore>) -> RoutingView {
+    routing_view(core.inner())
+}
+
+/// Pin a folder's sessions to a target, or `None` to follow the global choice.
+#[tauri::command]
+pub fn set_folder_pin(
+    core: State<SharedCore>,
+    folder: String,
+    target: Option<String>,
+) -> CmdResult<RoutingView> {
+    let target = match target.as_deref() {
+        None | Some("") => None,
+        Some(t) => Some(Target::parse(t).ok_or_else(|| format!("unknown target {t}"))?),
+    };
+    core.set_folder_pin(&folder, target)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(routing_view(core.inner()))
+}
+
+/// Install the `claude-anthropic` / `claude-kimi` / `claude-refuseless`
+/// commands in `~/.local/bin`.
+#[tauri::command]
+pub fn install_commands(core: State<SharedCore>) -> CmdResult<RoutingView> {
+    core.refresh_routes();
+    routing::install_commands().map_err(|e| format!("{e:#}"))?;
+    Ok(routing_view(core.inner()))
 }
 
 #[tauri::command]

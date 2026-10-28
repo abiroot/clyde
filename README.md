@@ -80,10 +80,13 @@ install the extension from the Chrome Web Store; Clyde reads its connection
 token from Chrome and registers the server with Claude Code. See
 [Browser tools](#browser-tools) below.
 
-**Kimi Code (optional).** Connect a Kimi Code membership and Kimi's K3.1 Pro
-appears as one more account: one click (or auto-switch) moves Claude Code onto
-it — running sessions included, within seconds — and back. Your skills, MCP
-servers and memory stay; only the model changes. See [Kimi](#kimi-code).
+**Kimi Code and Refuseless (optional).** Connect a Kimi Code membership or a
+Refuseless account and it appears as one more account: one click (or
+auto-switch) moves Claude Code onto it — running sessions included, within
+seconds — and back. Pick the model in Clyde or with `/model` in a session; your
+skills, MCP servers and memory stay. Individual folders and sessions can be
+pinned to a provider while the rest stay on Claude. See
+[Model providers](#model-providers-kimi-code-refuseless).
 
 **Auto-switch (optional).** Clyde can move Claude Code to another account by
 itself when the active one reaches a limit — and back once your preferred
@@ -149,35 +152,55 @@ Off by default; turn it on in the **Auto-switch** page.
   says so once and waits. Usage is checked every 2 minutes; running `claude`
   sessions follow a switch within ~30 seconds.
 
-## Kimi Code
+## Model providers (Kimi Code, Refuseless)
 
-Optional. **Add account → Kimi**, paste a key from the
-[Kimi Code console](https://www.kimi.com/code/console) (Plus plan or higher;
-usage counts against the plan, not per token). Kimi then has a card with its
-5-hour and monthly limits, a **Use** button, and a place in the auto-switch
-priority list (last by default, so Clyde returns to Claude as soon as an
-account has room).
+Optional. **Add account → Kimi…**, then **Kimi** or **Refuseless**, and paste a
+key: from the [Kimi Code console](https://www.kimi.com/code/console) (Plus plan
+or higher; usage counts against the plan) or your Refuseless account (billed per
+token from a prepaid balance). The provider then has a card with its limits (Kimi:
+5-hour and monthly) or its balance (Refuseless), a **Model** menu listing the
+provider's live model list, and a **Use** button. Kimi joins the auto-switch
+priority list last; Refuseless starts excluded, since it costs money per token.
 
-- **How the switch works.** Claude Code is pointed at Kimi through the `env`
-  block of `~/.claude/settings.json` (base URL, token, every model alias set to
-  `k3.1-pro`, a 256K context limit). Claude Code re-reads that file while it
-  runs, so sessions already open follow within ~5 seconds, conversation intact.
-  Switching back blanks the same keys; Clyde removes them once no session is
-  running.
-- **The relay.** A session that began on Anthropic carries content Kimi refuses
-  (tool lists added mid-conversation). While Kimi is active, Claude Code talks
-  to a small relay inside Clyde on `127.0.0.1:47311`, which strips that content
-  and adds the key — so the key isn't written to settings.json either. If Clyde
-  quits while Kimi is active, sessions are pointed straight at Kimi instead
-  (new sessions keep working; old ones may need restarting).
-- **Limits of the switch.** A session started with a fixed model id
-  (`--model claude-…`) keeps that name (Kimi accepts it); one in a folder you
-  haven't trusted only picks up the change when restarted. The first message
-  after a switch re-sends the conversation without the prompt cache. While on
-  Kimi, Claude Code labels the session "API Usage Billing"; Kimi still bills
-  your plan.
-- **From the terminal:** `Clyde.app/Contents/MacOS/clyde --switch kimi` (or an
-  email / label) switches the running Clyde, as if clicked.
+- **Choosing the model.** The card's **Model** menu sets the model every
+  session on that provider uses; sessions follow within seconds. Inside a
+  session, `/model` lists the provider's models under their own names
+  (`/model k3`, or pick one) and `/effort` works; a pick saved as the default
+  becomes the provider's model in Clyde too. `clyde --switch kimi:k3` does both
+  from a terminal.
+- **Per folder and per session.** The **Sessions** page lists running sessions;
+  pin a folder to Claude, Kimi or Refuseless and every session there follows
+  within seconds, whatever the global choice and whatever auto-switch does
+  (`clyde --pin kimi` pins the folder you run it in; `--pin follow` undoes it).
+  To start one session on a target, run `claude-kimi`, `claude-refuseless` or
+  `claude-anthropic` (installed from the Sessions page), or
+  `claude --settings ~/.claude/clyde/<target>.json` — this works inside cmux too.
+  Auto-switch only moves the global choice, so pinned sessions stay put.
+- **How the switch works.** Claude Code is pointed at the provider through the
+  `env` block of `~/.claude/settings.json` (base URL, token, model aliases, the
+  model's context window and capabilities) plus a `modelPicker` lineup. Claude
+  Code re-reads that file while it runs, so open sessions follow, conversation
+  intact. Switching back blanks the same keys (Clyde removes them once no session
+  runs), restores your own `model` and picker, and adds an `availableModels`
+  list of Claude's families so a session that picked a provider model with
+  `/model` moves back to Opus instead of erroring.
+- **The relay.** Claude Code talks to a small relay inside Clyde on
+  `127.0.0.1:47311`, which adds the key (so keys aren't written to
+  settings.json), drops content the providers refuse (tool lists added
+  mid-conversation), maps model names a provider doesn't serve to its chosen
+  model, and translates `/effort` and the thinking toggle into each model's own
+  levels. It also keeps the prompt cache warm: it drops Claude Code's
+  per-request attribution line and, for Refuseless, sends mid-conversation
+  system notes on the user side — together the difference between ~0% and ~99%
+  of the prompt read from cache. If Clyde quits, sessions are pointed straight
+  at the provider instead.
+- **Limits.** A folder you haven't trusted only picks up a switch when restarted.
+  The first message after a switch re-sends the conversation without the prompt
+  cache. While on a provider, Claude Code labels the session "API Usage
+  Billing"; the provider bills as described above.
+- **From the terminal:** `Clyde.app/Contents/MacOS/clyde --switch kimi` (or
+  `refuseless`, `kimi:<model>`, an email / label) switches the running Clyde, as
+  if clicked.
 
 ## Browser tools
 

@@ -47,8 +47,9 @@ account — whether or not Clyde is running.
 | `chrome_link.rs` | Read which claude.ai account the Claude-in-Chrome extension is signed into, so the UI can explain why `/chrome` stopped working after a switch. |
 | `browser.rs` | Optional account-independent browser tools: find Chrome profiles carrying the Playwright Extension, read its connection token, register Playwright MCP at user scope, and test the connection end to end. |
 | `autoswitch.rs` | Pure decision for automatic switching: rules, priority, exclusions, switch-back with headroom. |
-| `kimi.rs` | Kimi Code as a provider: key in the Keychain, the `settings.json` env that routes Claude Code to Kimi (on / blanked / tidied), plan usage from Kimi's usage endpoint. |
-| `kimi_relay.rs` | Localhost relay (127.0.0.1:47311) used while Kimi is active: strips content Kimi rejects (e.g. `tool_addition`) from requests and injects the key. |
+| `provider.rs` | Model providers (Kimi Code, Refuseless): keys in the Keychain, live model lists, the settings `env` that routes Claude Code to one (on / blanked / tidied), the `/model` lineup, usage (Kimi plan windows, Refuseless credit). |
+| `relay.rs` | Localhost relay (127.0.0.1:47311): injects keys, drops content providers reject, maps model names, translates effort/thinking, and keeps prompt-cache prefixes stable. |
+| `routing.rs` | Where requests go: the global provider route, folder pins (`.claude/settings.local.json`), launch pins (`~/.claude/clyde/<target>.json` + `claude-<target>` commands), the `model` / `availableModels` guards. |
 | `updater.rs` | Signed self-updates: background checks against GitHub releases, one-click install + relaunch. |
 | `commands.rs` | Tauri commands exposed to the UI (the only Rust↔JS surface). |
 | `lib.rs` | App wiring: plugins, tray, window behavior, the usage-poll loop. |
@@ -204,34 +205,77 @@ forced logout. Everything below exists to keep all copies on the latest generati
 The UI never sees tokens — only `AccountView` DTOs, pushed over the
 `clyde://update` Tauri event.
 
-## Kimi Code
+## Model providers (Kimi Code, Refuseless)
 
-Kimi isn't an OAuth account: it's a key (Keychain item `Clyde Kimi`) and a
-route. `set_active("kimi")` writes `kimi::env_on_relay()` into
-`~/.claude/settings.json`'s `env`; switching to a Claude account writes the
-keychain as usual and then `kimi::env_off()` (the same keys, **empty**).
-`Core::effective_active` reports Kimi whenever that env routes there, since the
-keychain still holds the last Claude login.
+A provider isn't an OAuth account: it's a key (Keychain items `Clyde Kimi`,
+`Clyde Refuseless`) and a route. `set_active("kimi")` calls
+`routing::enter_provider`, which writes `provider::env_on` into
+`~/.claude/settings.json`'s `env` and a `modelPicker` lineup of the provider's
+models; switching to a Claude account writes the keychain as usual and then
+`routing::leave_provider`: the same keys **empty**, the user's picker and
+`model` restored, and an `availableModels` guard of Claude's families.
+`Core::effective_active` reports the provider whenever the env routes there,
+since the keychain still holds the last Claude login.
 
 Why this reaches running sessions (verified against Claude Code 2.1.312 with
-live PTY sessions and mock servers): Claude Code watches `settings.json`, and on
-an `env` change re-applies it into `process.env` and clears its auth caches; its
-API client is rebuilt per request from `process.env`. Object.assign semantics
-mean a removed key is never unset — hence blanking, and `kimi::tidy` once no
-`claude` is running. Model aliases (`ANTHROPIC_DEFAULT_*_MODEL`) remap live; a
-model pinned at launch doesn't (Kimi accepts Claude model names anyway).
+live PTY sessions and mock servers): Claude Code watches its settings files, and
+on an `env` change re-applies it into `process.env` and clears its auth caches;
+its API client is rebuilt per request from `process.env`. Object.assign
+semantics mean a removed key is never unset — hence blanking, and
+`provider::tidy` once no `claude` is running. Model aliases
+(`ANTHROPIC_DEFAULT_*_MODEL`) remap live; a model a session picked by id
+doesn't, which the relay handles (foreign names → the provider's chosen model)
+and, on the way back to Claude, the `availableModels` guard (the session falls
+back to the default instead of a 404).
 
-A session that began on Anthropic has `tool_addition` blocks in its history
-(tools loaded mid-conversation); Kimi rejects any request containing one with
-`400 Invalid request` (found by capturing and bisecting a real request). The
-relay (`kimi_relay.rs`) removes unsupported content blocks and empty messages,
-swaps the placeholder token for the real key, and streams the response back.
-`Core::on_exit` re-points a relayed route straight at Kimi when Clyde quits;
-`refresh_kimi_route` moves it back onto the relay at launch.
-`cleanup_legacy_integration` (which strips stale localhost base URLs) spares
-the relay's `/kimi` URL.
+Capabilities: Claude Code can't size or configure model ids it doesn't know, so
+the env also carries `CLAUDE_CODE_MODEL_CAPABILITIES` (effort, max effort,
+thinking per model; `mid_conv_tool_change` off), `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+(the smallest window the provider offers), an auto-compact window capped at 256K,
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` (it otherwise assumes the default model is a
+1M one) and `CLAUDE_CODE_ATTRIBUTION_HEADER=0`.
 
-`clyde --switch <who>` reaches the running instance through the single-instance
+`/model` writes its pick into the user's `model` setting. `Core::watch_model_setting`
+(every 3 s, on mtime change) takes a provider's model id from there as that
+provider's chosen model and restores the user's own value, so new Claude
+sessions never start on a name Anthropic doesn't know.
+
+Pins: a folder's `.claude/settings.local.json` env outranks the user's and
+applies live; flag settings (`--settings`) outrank it too and combine with a
+wrapper's own `--settings` (cmux). Auto-switch only edits the user file, so
+pins hold. Unpinning removes the keys from the folder and makes sure the user
+env names every key (blank on Claude), since a deleted key wouldn't reach a
+running session.
+
+The relay (`relay.rs`, paths `/<provider>/…`, optional `/@<model>/`):
+- drops unsupported content blocks (`tool_addition`: Kimi answers `400 Invalid
+  request`, found by capturing and bisecting a real request) and empty messages;
+- maps model names the provider doesn't serve to its chosen model, strips `[1m]`;
+- effort: the highest level the model offers at or below the requested one, as
+  `reasoning_effort` for Refuseless (which ignores `output_config`); thinking
+  off becomes `reasoning_effort: off` where allowed, and is dropped for
+  thinking-only models (Kimi 400s on it);
+- prompt cache (measured on both providers, 2026-10-28): drops the attribution
+  line at the top of the system prompt (its per-request fields cost Refuseless
+  the whole cache) and, for Refuseless, turns mid-conversation `system` messages
+  into `<system-reminder>` text on the user side (Refuseless folds them into the
+  system prompt: 0 of ~8K tokens cached with one, 7,936 without). All rewrites
+  are pure functions of the request, so prefixes stay identical turn to turn;
+  `serde_json`'s `preserve_order` keeps the rest of the body as sent;
+- swaps the placeholder token for the real key and streams the response back.
+
+`Core::on_exit` re-points every relayed route (global, folders, launch files)
+straight at the provider when Clyde quits; `refresh_routes` moves them back onto
+the relay at launch. `cleanup_legacy_integration` (which strips stale localhost
+base URLs) spares relay URLs.
+
+Debug builds only: `CLYDE_TEST_KEYS` (JSON of provider keys, skips the Keychain
+and the account vault), `CLYDE_TEST_UPSTREAM_<PROVIDER>` and `CLYDE_RELAY_PORT`
+run a test copy next to the real Clyde; build it with
+`TAURI_CONFIG='{"identifier":"com.clyde.e2e"}'` so the single-instance socket
+differs too.
+
+`clyde --switch <who>` and `clyde --pin <target>` reach the running instance through the single-instance
 plugin; the switch runs on its own thread because the plugin's accept loop
 blocks the runtime worker that would otherwise run it.
 

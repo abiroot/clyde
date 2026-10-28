@@ -32,8 +32,9 @@ export function limitRows(a: AccountView): LimitRowData[] {
       forecast: fc(l.label),
     })),
   ];
-  // Kimi has a 5-hour window and a monthly cap, no weekly one.
-  return a.provider === "kimi" ? rows.filter((r) => r.percent != null) : rows;
+  // Providers have only the limits they report (Kimi: a 5-hour window and a
+  // monthly cap; Refuseless: none, just a balance).
+  return a.provider === "claude" ? rows : rows.filter((r) => r.percent != null);
 }
 
 export function LimitRow({ label, percent, resetsAt, severity, forecast, large = false }: LimitRowData & { large?: boolean }) {
@@ -83,6 +84,8 @@ export function AccountSummary({ account }: { account: AccountView }) {
   const u = account.usage;
   if (account.usage_error)
     return <span style={{ color: "var(--n-warn)" }}>{account.usage_error}</span>;
+  if (u.status === "rejected" && u.credit_usd != null)
+    return <span style={{ color: "var(--n-danger)" }}>Out of credit</span>;
   if (u.status === "rejected")
     return (
       <span style={{ color: "var(--n-danger)" }}>
@@ -90,6 +93,7 @@ export function AccountSummary({ account }: { account: AccountView }) {
       </span>
     );
   if (u.updated_at === 0) return <span className="n-dim">No usage read yet</span>;
+  if (u.credit_usd != null) return <span className="n-dim">{credit(u.credit_usd)} credit left</span>;
   const scoped = (u.scoped_limits ?? []).filter((l) => l.percent >= 50);
   return (
     <span className="n-dim">
@@ -97,6 +101,16 @@ export function AccountSummary({ account }: { account: AccountView }) {
       {scoped.map((l) => ` · ${scopedLabel(l.label).split(" · ")[0]} ${Math.round(l.percent)}%`).join("")}
     </span>
   );
+}
+
+/** A prepaid balance, e.g. "$10.03". */
+export function credit(usd: number): string {
+  return `$${usd.toFixed(2)}`;
+}
+
+/** e.g. "256K context", "1M context". */
+export function contextLabel(tokens: number): string {
+  return tokens >= 1_000_000 ? `${Math.round(tokens / 1_048_576)}M context` : `${Math.round(tokens / 1024)}K context`;
 }
 
 // ---- layout ----------------------------------------------------------------

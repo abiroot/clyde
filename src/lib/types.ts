@@ -10,6 +10,8 @@ export interface UsageSnapshot {
   updated_at: number;
   /** Per-model / per-product caps, e.g. "7-day · Fable". */
   scoped_limits: UsageLimit[];
+  /** Prepaid balance in USD, for per-token providers (Refuseless). */
+  credit_usd?: number | null;
 }
 
 export interface UsageLimit {
@@ -24,13 +26,38 @@ export interface AccountView {
   label: string;
   email: string | null;
   subscription_type: string | null;
-  /** "claude", or "kimi" for Kimi Code (switched via settings.json, not a login). */
-  provider: "claude" | "kimi";
+  /** "claude", or a model provider (switched via settings.json, not a login). */
+  provider: Provider;
+  /** The provider's models (empty for Claude accounts). */
+  models: ModelInfo[];
+  /** The model the provider's sessions use. */
+  model: string | null;
   usage: UsageSnapshot;
   is_active: boolean;
   /** Why the last usage read failed, when it did. */
   usage_error: string | null;
   forecasts: Forecast[];
+}
+
+export type Provider = "claude" | "kimi" | "refuseless";
+
+/** Where a pinned folder or launch sends Claude Code. */
+export type Target = "claude" | "kimi" | "refuseless";
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  /** Context window in tokens. */
+  context: number;
+  efforts: string[];
+  thinking_only: boolean;
+}
+
+export interface RoutingView {
+  /** Folder → target. */
+  folder_pins: Record<string, Target>;
+  commands_installed: boolean;
+  launch_files: Partial<Record<Target, string>>;
 }
 
 /** When a limit runs out at the current pace. */
@@ -52,6 +79,8 @@ export interface Session {
   cwd: string | null;
   running_secs: number | null;
   config_dir: string | null;
+  /** Started with a launch command (`claude --settings ~/.claude/clyde/<target>.json`). */
+  pin: Target | null;
 }
 
 export interface Settings {

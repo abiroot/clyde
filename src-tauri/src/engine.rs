@@ -14,9 +14,11 @@ use tauri_plugin_notification::NotificationExt;
 use crate::autoswitch::{self, Candidate, Decision, Reason};
 use crate::history::{History, Point};
 use crate::model::*;
+use crate::provider::{ModelInfo, Provider};
+use crate::routing::{self, ProviderRoute, Target};
 use crate::settings::Settings;
 use crate::updater::UpdateInfo;
-use crate::{alerts, chrome_link, claude_sync, import_claude, kimi, oauth, settings, vault};
+use crate::{alerts, chrome_link, claude_sync, import_claude, oauth, settings, vault};
 
 /// The tray icon's id (see `lib.rs`), for the menubar readout.
 pub const TRAY_ID: &str = "clyde-tray";
@@ -44,8 +46,16 @@ pub struct Core {
     history: RwLock<History>,
     /// A newer Clyde release, once the updater has found one.
     update: RwLock<Option<UpdateInfo>>,
-    /// The localhost Kimi relay is listening.
+    /// The localhost provider relay is listening.
     relay_up: std::sync::atomic::AtomicBool,
+    /// Each provider's models, as last read (or the built-in fallback).
+    catalogs: RwLock<HashMap<Provider, Vec<ModelInfo>>>,
+    /// When each provider's model list was last read (ms).
+    catalog_read_at: RwLock<HashMap<Provider, i64>>,
+    /// Routing bookkeeping: chosen models, pins, what to restore.
+    routing: RwLock<routing::Prefs>,
+    /// `settings.json`'s last seen modification time, for the `/model` watch.
+    settings_seen: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
 
 struct CoreState {
@@ -60,9 +70,9 @@ struct CoreState {
     last_switch: Option<SwitchEvent>,
     /// Already told the user every account is used up (once per episode).
     exhausted_notified: bool,
-    /// The Kimi Code key, when Kimi is connected. Kimi isn't stored with the
-    /// Claude accounts: it has no OAuth to refresh, only this key.
-    kimi_key: Option<String>,
+    /// Keys of the connected providers. They aren't stored with the Claude
+    /// accounts: there's no OAuth to refresh, only the key.
+    keys: HashMap<Provider, String>,
 }
 
 /// One automatic switch.
@@ -104,6 +114,10 @@ impl Core {
             history: RwLock::new(History::default()),
             update: RwLock::new(None),
             relay_up: std::sync::atomic::AtomicBool::new(false),
+            catalogs: RwLock::new(HashMap::new()),
+            catalog_read_at: RwLock::new(HashMap::new()),
+            routing: RwLock::new(routing::Prefs::default()),
+            settings_seen: std::sync::Mutex::new(None),
             state: RwLock::new(CoreState {
                 accounts,
                 usage: HashMap::new(),
@@ -112,9 +126,9 @@ impl Core {
                 manual_hold: false,
                 last_switch: None,
                 exhausted_notified: false,
-                // Loaded off the startup path (see `load_kimi_key`): a Keychain
-                // prompt must never hold the app up.
-                kimi_key: None,
+                // Loaded off the startup path (see `load_provider_keys`): a
+                // Keychain prompt must never hold the app up.
+                keys: HashMap::new(),
             }),
         }))
     }
@@ -123,6 +137,8 @@ impl Core {
         if let Ok(dir) = app.path().app_data_dir() {
             *self.prefs.write().unwrap() = settings::load(&dir);
             *self.history.write().unwrap() = History::open(&dir, now_ms());
+            *self.catalogs.write().unwrap() = crate::provider::load_catalogs(&dir);
+            *self.routing.write().unwrap() = routing::Prefs::load(&dir);
             *self.data_dir.write().unwrap() = Some(dir);
         }
         *self.app.write().unwrap() = Some(app);
@@ -182,8 +198,8 @@ impl Core {
     pub fn snapshot(&self) -> AppSnapshot {
         let s = self.state.read().unwrap();
         let active_id = s.active_id.clone();
-        let active_email = if active_id.as_deref() == Some(kimi::ID) {
-            Some("Kimi".to_string())
+        let active_email = if let Some(p) = active_id.as_deref().and_then(Provider::from_id) {
+            Some(p.label().to_string())
         } else {
             active_id
                 .as_ref()
@@ -200,23 +216,41 @@ impl Core {
                 email: a.email.clone(),
                 subscription_type: a.subscription_type.clone(),
                 provider: "claude".into(),
+                models: Vec::new(),
+                model: None,
                 usage: s.usage.get(&a.id).cloned().unwrap_or_default(),
                 is_active: Some(&a.id) == active_id.as_ref(),
                 usage_error: s.usage_errors.get(&a.id).cloned(),
                 forecasts: self.history.read().unwrap().forecasts(&a.id, now_ms()),
             })
             .collect();
-        if s.kimi_key.is_some() {
+        for p in Provider::ALL {
+            if !s.keys.contains_key(&p) {
+                continue;
+            }
+            let catalog = self.catalog(p);
+            let model = self.selected_model(p);
+            let name = catalog
+                .iter()
+                .find(|m| m.id == model)
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| model.clone());
+            let plan = match p {
+                Provider::Kimi => "Kimi Code",
+                Provider::Refuseless => "Refuseless",
+            };
             accounts.push(AccountView {
-                id: kimi::ID.into(),
-                label: "Kimi".into(),
+                id: p.id().into(),
+                label: p.label().into(),
                 email: None,
-                subscription_type: Some(format!("Kimi Code · {}", kimi::MODEL)),
-                provider: "kimi".into(),
-                usage: s.usage.get(kimi::ID).cloned().unwrap_or_default(),
-                is_active: active_id.as_deref() == Some(kimi::ID),
-                usage_error: s.usage_errors.get(kimi::ID).cloned(),
-                forecasts: self.history.read().unwrap().forecasts(kimi::ID, now_ms()),
+                subscription_type: Some(format!("{plan} · {name}")),
+                provider: p.id().into(),
+                models: catalog,
+                model: Some(model),
+                usage: s.usage.get(p.id()).cloned().unwrap_or_default(),
+                is_active: active_id.as_deref() == Some(p.id()),
+                usage_error: s.usage_errors.get(p.id()).cloned(),
+                forecasts: self.history.read().unwrap().forecasts(p.id(), now_ms()),
             });
         }
 
@@ -260,8 +294,8 @@ impl Core {
     }
 
     pub fn remove_account(&self, id: &str) -> Result<()> {
-        if id == kimi::ID {
-            return self.disconnect_kimi();
+        if let Some(p) = Provider::from_id(id) {
+            return self.disconnect_provider(p);
         }
         {
             let mut s = self.state.write().unwrap();
@@ -278,7 +312,7 @@ impl Core {
     }
 
     pub fn rename_account(&self, id: &str, label: &str) -> Result<()> {
-        if id == kimi::ID {
+        if Provider::from_id(id).is_some() {
             return Ok(());
         }
         {
@@ -308,21 +342,15 @@ impl Core {
         // and the rotation would be lost once we overwrite the slot.
         self.adopt_active_slot();
 
-        if id == kimi::ID {
-            let key = self
-                .state
-                .read()
-                .unwrap()
-                .kimi_key
-                .clone()
-                .ok_or_else(|| anyhow!("Kimi isn't connected"))?;
+        if let Some(p) = Provider::from_id(id) {
             // The keychain slot stays on the last Claude account: Claude Code
-            // still uses it for claude.ai services, and switching back is then
-            // just a matter of clearing the env again.
-            let _ = key; // the relay supplies it; settings.json gets a placeholder
-            claude_sync::write_settings_env(&self.kimi_env())
-                .context("pointing Claude Code at Kimi in settings.json")?;
-            self.state.write().unwrap().active_id = Some(kimi::ID.to_string());
+            // still uses it for claude.ai services, sessions pinned to Claude
+            // keep running on it, and switching back is then just a matter of
+            // clearing the env again.
+            self.route_globally(p).with_context(|| {
+                format!("pointing Claude Code at {} in settings.json", p.label())
+            })?;
+            self.state.write().unwrap().active_id = Some(p.id().to_string());
             self.update_tray_readout();
             self.emit();
             return Ok(());
@@ -355,11 +383,11 @@ impl Core {
             .ok_or_else(|| anyhow!("unknown account {id}"))?;
         claude_sync::activate(&account)
             .context("writing the account into Claude Code's keychain")?;
-        // Leaving Kimi: blank its env so running sessions drop back to the
-        // keychain login (deleting the keys wouldn't reach them).
-        if kimi_routed() {
-            claude_sync::write_settings_env(&kimi::env_off())
-                .context("switching Claude Code back from Kimi in settings.json")?;
+        // Leaving a provider: blank its env so running sessions drop back to
+        // the keychain login (deleting the keys wouldn't reach them).
+        if routing::global_provider().is_some() {
+            self.leave_provider_globally()
+                .context("switching Claude Code back to Claude in settings.json")?;
         }
         {
             let mut s = self.state.write().unwrap();
@@ -391,8 +419,10 @@ impl Core {
             let s = self.state.read().unwrap();
             let mut candidates: Vec<Candidate> =
                 s.accounts.iter().map(|a| candidate(&s, &a.id)).collect();
-            if s.kimi_key.is_some() {
-                candidates.push(candidate(&s, kimi::ID));
+            for p in Provider::ALL {
+                if s.keys.contains_key(&p) {
+                    candidates.push(candidate(&s, p.id()));
+                }
             }
             let decision = autoswitch::decide(
                 &cfg,
@@ -411,7 +441,9 @@ impl Core {
                     )
                 })
                 .collect();
-            names.insert(kimi::ID.to_string(), "Kimi".to_string());
+            for p in Provider::ALL {
+                names.insert(p.id().to_string(), p.label().to_string());
+            }
             (decision, s.active_id.clone(), names)
         };
         let Some(from) = active else { return };
@@ -488,56 +520,330 @@ impl Core {
         }
     }
 
-    // ---- Kimi -------------------------------------------------------------
+    // ---- providers (Kimi, Refuseless) ---------------------------------------
 
-    /// The account to report as active: Kimi while settings.json routes Claude
-    /// Code there (the keychain then still holds the last Claude login), else
-    /// whoever owns the keychain slot.
+    /// The account to report as active: a provider while settings.json routes
+    /// Claude Code there (the keychain then still holds the last Claude login),
+    /// else whoever owns the keychain slot.
     fn effective_active(&self, keychain_owner: Option<String>) -> Option<String> {
-        let connected = self.state.read().unwrap().kimi_key.is_some();
-        if connected && kimi_routed() {
-            Some(kimi::ID.to_string())
-        } else {
-            keychain_owner
+        match routing::global_provider() {
+            Some(p) if self.provider_key(p).is_some() => Some(p.id().to_string()),
+            _ => keychain_owner,
         }
     }
 
-    /// Connect Kimi with a Kimi Code key, after checking Kimi accepts it.
-    pub async fn connect_kimi(&self, raw_key: &str) -> Result<()> {
-        let key = kimi::normalize_key(raw_key)?;
-        let usage = kimi::verify_key(&self.http, &key).await?;
-        kimi::save_key(&key)?;
-        {
-            let mut s = self.state.write().unwrap();
-            s.kimi_key = Some(key.clone());
-            s.usage_errors.remove(kimi::ID);
+    /// The connected provider's key, for the relay.
+    pub fn provider_key(&self, p: Provider) -> Option<String> {
+        self.state.read().unwrap().keys.get(&p).cloned()
+    }
+
+    /// The provider's models: as last read, or the built-in fallback.
+    pub fn catalog(&self, p: Provider) -> Vec<ModelInfo> {
+        self.catalogs
+            .read()
+            .unwrap()
+            .get(&p)
+            .filter(|c| !c.is_empty())
+            .cloned()
+            .unwrap_or_else(|| p.fallback_models())
+    }
+
+    /// The model the provider's aliases point at: the user's pick while the
+    /// provider still serves it, else the default, else its first model.
+    pub fn selected_model(&self, p: Provider) -> String {
+        let catalog = self.catalog(p);
+        let has = |id: &str| catalog.iter().any(|m| m.id == id);
+        let picked = self.routing.read().unwrap().models.get(&p).cloned();
+        match picked {
+            Some(m) if has(&m) => m,
+            _ if has(p.default_model()) => p.default_model().to_string(),
+            _ => catalog
+                .first()
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| p.default_model().to_string()),
         }
-        // A replaced key must reach settings.json too, or Kimi sessions keep
-        // sending the old one.
-        if kimi_routed() {
-            claude_sync::write_settings_env(&self.kimi_env())?;
+    }
+
+    /// Whether `model` (with or without `[1m]`) is one of a provider's ids.
+    fn is_provider_model(&self, model: &str) -> bool {
+        let bare = model
+            .strip_suffix("[1m]")
+            .or_else(|| model.strip_suffix("[1M]"))
+            .unwrap_or(model);
+        Provider::ALL
+            .into_iter()
+            .any(|p| self.catalog(p).iter().any(|m| m.id == bare))
+    }
+
+    fn save_routing(&self) {
+        if let Some(dir) = self.data_dir.read().unwrap().as_ref() {
+            if let Err(e) = self.routing.read().unwrap().save(dir) {
+                tracing::warn!("couldn't save routing preferences: {e:#}");
+            }
         }
-        self.record_usage(kimi::ID, usage);
+    }
+
+    /// Build the route to `p` and hand it to `f`.
+    fn with_route<T>(&self, p: Provider, f: impl FnOnce(&ProviderRoute) -> T) -> T {
+        let key = self.provider_key(p);
+        let catalog = self.catalog(p);
+        let selected = self.selected_model(p);
+        let model = catalog
+            .iter()
+            .find(|m| m.id == selected)
+            .cloned()
+            .unwrap_or_else(|| catalog[0].clone());
+        f(&ProviderRoute {
+            provider: p,
+            key: key.as_deref(),
+            catalog: &catalog,
+            model: &model,
+        })
+    }
+
+    fn relay_up(&self) -> bool {
+        self.relay_up.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Send every default-config session to `p`.
+    fn route_globally(&self, p: Provider) -> Result<()> {
+        if self.provider_key(p).is_none() {
+            anyhow::bail!("{} isn't connected", p.label());
+        }
+        let relay = self.relay_up();
+        let mut prefs = self.routing.read().unwrap().clone();
+        self.with_route(p, |r| {
+            routing::enter_provider(&mut prefs, r, relay, |m| self.is_provider_model(m))
+        })?;
+        *self.routing.write().unwrap() = prefs;
+        self.save_routing();
         Ok(())
     }
 
-    /// Forget the Kimi key; if Claude Code was on Kimi, put it back on the
-    /// keychain login.
-    fn disconnect_kimi(&self) -> Result<()> {
-        if kimi_routed() {
-            claude_sync::write_settings_env(&kimi::env_off())?;
+    /// Send default-config sessions back to Anthropic.
+    fn leave_provider_globally(&self) -> Result<()> {
+        let mut prefs = self.routing.read().unwrap().clone();
+        routing::leave_provider(&mut prefs, |m| self.is_provider_model(m))?;
+        *self.routing.write().unwrap() = prefs;
+        self.save_routing();
+        Ok(())
+    }
+
+    /// Rewrite every place that routes to a provider — the global choice,
+    /// pinned folders, launch files — for the current keys, models and relay
+    /// state. Cheap, and idempotent: files are only written when they change.
+    pub fn refresh_routes(&self) {
+        let relay = self.relay_up();
+        if let Some(p) = routing::global_provider() {
+            if self.provider_key(p).is_some() {
+                if let Err(e) = self.route_globally(p) {
+                    tracing::warn!("couldn't update the {} route: {e:#}", p.label());
+                }
+            }
         }
-        kimi::delete_key()?;
+        let pins = self.routing.read().unwrap().folder_pins.clone();
+        for (folder, target) in pins {
+            let res = match target.provider() {
+                Some(p) if self.provider_key(p).is_some() => self.with_route(p, |r| {
+                    routing::pin_folder(std::path::Path::new(&folder), Some(r), relay)
+                }),
+                Some(_) => continue,
+                None => routing::pin_folder(std::path::Path::new(&folder), None, relay),
+            };
+            if let Err(e) = res {
+                tracing::warn!("couldn't update the pin for {folder}: {e:#}");
+            }
+        }
+        for t in Target::ALL {
+            let settings = match t.provider() {
+                Some(p) if self.provider_key(p).is_some() => {
+                    self.with_route(p, |r| routing::launch_settings(t, Some(r), relay))
+                }
+                Some(_) => None,
+                None => routing::launch_settings(t, None, relay),
+            };
+            if let Err(e) = routing::write_launch_file(t, settings) {
+                tracing::warn!("couldn't write the {} launch file: {e:#}", t.id());
+            }
+        }
+    }
+
+    /// Point `p`'s aliases at `model` — in the global route, pinned folders and
+    /// launch files — so sessions on `p` follow within seconds.
+    pub fn set_provider_model(&self, p: Provider, model: &str) -> Result<()> {
+        if !self.catalog(p).iter().any(|m| m.id == model) {
+            anyhow::bail!("{} doesn't offer {model}", p.label());
+        }
+        self.routing
+            .write()
+            .unwrap()
+            .models
+            .insert(p, model.to_string());
+        self.save_routing();
+        self.refresh_routes();
+        self.emit();
+        Ok(())
+    }
+
+    /// Connect a provider with a key from its console, after checking the
+    /// provider accepts it.
+    pub async fn connect_provider(&self, p: Provider, raw_key: &str) -> Result<()> {
+        let key = p.normalize_key(raw_key)?;
+        let usage = p.verify_key(&self.http, &key).await?;
+        p.save_key(&key)?;
         {
             let mut s = self.state.write().unwrap();
-            s.kimi_key = None;
-            s.usage.remove(kimi::ID);
-            s.usage_errors.remove(kimi::ID);
+            s.keys.insert(p, key.clone());
+            s.usage_errors.remove(p.id());
         }
+        self.refresh_catalog(p, &key).await;
+        // Paid per token: auto-switch only moves there if the user says so.
+        if p.pay_per_token() {
+            let mut prefs = self.settings();
+            if !prefs.auto_switch.accounts.contains_key(p.id()) {
+                prefs
+                    .auto_switch
+                    .accounts
+                    .entry(p.id().to_string())
+                    .or_default()
+                    .exclude = true;
+                let _ = self.set_settings(prefs);
+            }
+        }
+        // A replaced key must reach the settings files too, or sessions keep
+        // sending the old one (when not going through the relay).
+        self.refresh_routes();
+        self.record_usage(p.id(), usage);
+        Ok(())
+    }
+
+    /// Forget a provider's key; if Claude Code was on it, put it back on the
+    /// keychain login. Folders pinned to it lose their pin.
+    fn disconnect_provider(&self, p: Provider) -> Result<()> {
+        if routing::global_provider() == Some(p) {
+            self.leave_provider_globally()?;
+        }
+        let pinned: Vec<String> = self
+            .routing
+            .read()
+            .unwrap()
+            .folder_pins
+            .iter()
+            .filter(|(_, t)| t.provider() == Some(p))
+            .map(|(f, _)| f.clone())
+            .collect();
+        for folder in pinned {
+            let _ = self.set_folder_pin(&folder, None);
+        }
+        p.delete_key()?;
+        {
+            let mut s = self.state.write().unwrap();
+            s.keys.remove(&p);
+            s.usage.remove(p.id());
+            s.usage_errors.remove(p.id());
+        }
+        self.refresh_routes();
         let owner = self.adopt_active_slot();
         self.state.write().unwrap().active_id = owner;
         self.emit();
         Ok(())
+    }
+
+    /// Pin a folder's sessions to `target`, or follow the global choice again
+    /// with `None`. Applies live to sessions running there.
+    pub fn set_folder_pin(&self, folder: &str, target: Option<Target>) -> Result<()> {
+        let path = std::path::Path::new(folder);
+        if !path.is_absolute() || !path.is_dir() {
+            anyhow::bail!("{folder} isn't a folder");
+        }
+        let relay = self.relay_up();
+        match target {
+            Some(t) => {
+                match t.provider() {
+                    Some(p) => {
+                        if self.provider_key(p).is_none() {
+                            anyhow::bail!("{} isn't connected", p.label());
+                        }
+                        self.with_route(p, |r| routing::pin_folder(path, Some(r), relay))?;
+                    }
+                    None => routing::pin_folder(path, None, relay)?,
+                }
+                self.routing
+                    .write()
+                    .unwrap()
+                    .folder_pins
+                    .insert(folder.to_string(), t);
+            }
+            None => {
+                routing::unpin_folder(path)?;
+                self.routing.write().unwrap().folder_pins.remove(folder);
+                // A key that's simply gone doesn't reach a running session:
+                // make sure the user's env names every one, blank on Claude.
+                if routing::global_provider().is_none() {
+                    claude_sync::edit_settings_env(|env| {
+                        let mut changed = false;
+                        for k in crate::provider::ENV_KEYS {
+                            if !env.contains_key(*k) {
+                                env.insert(
+                                    (*k).to_string(),
+                                    serde_json::Value::String(String::new()),
+                                );
+                                changed = true;
+                            }
+                        }
+                        changed
+                    })?;
+                }
+            }
+        }
+        self.save_routing();
+        Ok(())
+    }
+
+    pub fn folder_pins(&self) -> std::collections::BTreeMap<String, Target> {
+        self.routing.read().unwrap().folder_pins.clone()
+    }
+
+    /// `/model` picked a provider's model and saved it as the default: adopt
+    /// it as that provider's chosen model when it's the global one, and put
+    /// the user's own `model` setting back either way. Runs every few seconds,
+    /// but only reads `settings.json` when it changed.
+    pub fn watch_model_setting(&self) {
+        let Ok(path) = claude_sync::settings_path() else {
+            return;
+        };
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        {
+            let mut seen = self.settings_seen.lock().unwrap();
+            if *seen == modified {
+                return;
+            }
+            *seen = modified;
+        }
+        let mut prefs = self.routing.read().unwrap().clone();
+        let (picked, changed) =
+            match routing::reconcile_model_setting(&mut prefs, |m| self.is_provider_model(m)) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("couldn't check the model setting: {e:#}");
+                    return;
+                }
+            };
+        if changed || picked.is_some() {
+            *self.routing.write().unwrap() = prefs;
+            self.save_routing();
+        }
+        let Some(picked) = picked else { return };
+        let bare = picked.trim_end_matches("[1m]").to_string();
+        match routing::global_provider() {
+            Some(p) if self.catalog(p).iter().any(|m| m.id == bare) => {
+                tracing::info!("/model picked {bare}: {}'s chosen model now", p.label());
+                if let Err(e) = self.set_provider_model(p, &bare) {
+                    tracing::warn!("couldn't adopt {bare}: {e:#}");
+                }
+            }
+            _ => tracing::info!("put the model setting back after /model saved {picked}"),
+        }
     }
 
     /// Keep trying to read the saved accounts if startup couldn't; once they
@@ -563,107 +869,119 @@ impl Core {
         });
     }
 
-    /// Read the Kimi key from the Keychain in the background, then route
-    /// Claude Code through the relay if it's on Kimi. A Keychain read can wait
-    /// on a permission prompt (after an update changes Clyde's signature), and
-    /// that must not stall startup.
-    pub fn load_kimi_key(self: &Arc<Self>) {
+    /// Read the providers' keys from the Keychain in the background, then
+    /// route through the relay wherever Claude Code is on one. A Keychain read
+    /// can wait on a permission prompt (after an update changes Clyde's
+    /// signature), and that must not stall startup.
+    pub fn load_provider_keys(self: &Arc<Self>) {
         let core = self.clone();
         std::thread::spawn(move || {
-            let Some(key) = kimi::key() else {
+            let mut any = false;
+            for p in Provider::ALL {
+                let Some(key) = p.key() else { continue };
+                // Re-create the item as Clyde's own (the way the account list is
+                // stored), so it stays readable across updates even if
+                // something else created it.
+                p.adopt_key(&key);
+                core.state.write().unwrap().keys.insert(p, key);
+                any = true;
+            }
+            if !any {
                 return;
-            };
-            // Re-create the item as Clyde's own (the way the account list is
-            // stored), so it stays readable across updates even if something
-            // else created it.
-            kimi::adopt_key(&key);
-            core.state.write().unwrap().kimi_key = Some(key);
+            }
             core.detect_active();
-            core.refresh_kimi_route();
+            core.refresh_routes();
             core.emit();
+            let c = core.clone();
+            tauri::async_runtime::spawn(async move { c.poll_providers().await });
         });
     }
 
-    /// The connected Kimi key, for the relay.
-    pub fn kimi_key(&self) -> Option<String> {
-        self.state.read().unwrap().kimi_key.clone()
-    }
-
-    /// Note whether the relay is up; Kimi env written from now on uses it.
+    /// Note whether the relay is up; provider env written from now on uses it.
     pub fn set_relay_running(&self, up: bool) {
         self.relay_up
             .store(up, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Env for "Claude Code on Kimi": through the relay when it's up, else
-    /// direct (new sessions still work; mid-conversation moves may not).
-    fn kimi_env(&self) -> Vec<(&'static str, String)> {
-        let relay = self.relay_up.load(std::sync::atomic::Ordering::Relaxed);
-        match (relay, self.kimi_key()) {
-            (false, Some(key)) => kimi::env_on_direct(&key),
-            _ => kimi::env_on_relay(),
-        }
-    }
-
-    /// At launch: if Claude Code is on Kimi, route it through the relay (or
-    /// direct, if the relay couldn't start) — whichever this run provides.
-    pub fn refresh_kimi_route(&self) {
-        let env = claude_sync::read_settings_env();
-        if self.kimi_key().is_none() || !kimi::routes_to_kimi(&env) {
-            return;
-        }
-        let want_relay = self.relay_up.load(std::sync::atomic::Ordering::Relaxed);
-        if kimi::via_relay(&env) != want_relay {
-            if let Err(e) = claude_sync::write_settings_env(&self.kimi_env()) {
-                tracing::warn!("couldn't update the Kimi route: {e:#}");
-            }
-        }
-    }
-
-    /// Clyde is quitting: its relay goes with it, so a Kimi route through the
-    /// relay is switched to direct.
+    /// Clyde is quitting: its relay goes with it, so every route through the
+    /// relay is switched to go straight to the provider.
     pub fn on_exit(&self) {
-        let env = claude_sync::read_settings_env();
-        if !kimi::via_relay(&env) {
+        if !self.relay_up() {
             return;
         }
-        if let Some(key) = self.kimi_key() {
-            match claude_sync::write_settings_env(&kimi::env_on_direct(&key)) {
-                Ok(()) => {
-                    tracing::info!("Clyde is quitting: pointed Kimi sessions straight at Kimi")
+        self.set_relay_running(false);
+        self.refresh_routes();
+        tracing::info!("Clyde is quitting: pointed provider sessions straight at the providers");
+    }
+
+    /// Re-read a provider's model list (hourly, or on demand).
+    async fn refresh_catalog(&self, p: Provider, key: &str) {
+        match p.fetch_models(&self.http, key).await {
+            Ok(models) => {
+                let changed = self.catalogs.read().unwrap().get(&p) != Some(&models);
+                self.catalog_read_at.write().unwrap().insert(p, now_ms());
+                if changed {
+                    self.catalogs.write().unwrap().insert(p, models);
+                    if let Some(dir) = self.data_dir.read().unwrap().as_ref() {
+                        let _ = crate::provider::save_catalogs(dir, &self.catalogs.read().unwrap());
+                    }
+                    self.refresh_routes();
                 }
-                Err(e) => tracing::warn!("couldn't hand Kimi sessions over before quitting: {e:#}"),
+            }
+            Err(e) => tracing::debug!("{} model list failed: {e:#}", p.label()),
+        }
+    }
+
+    async fn poll_providers(&self) {
+        for p in Provider::ALL {
+            let Some(key) = self.provider_key(p) else {
+                continue;
+            };
+            let stale = self
+                .catalog_read_at
+                .read()
+                .unwrap()
+                .get(&p)
+                .is_none_or(|t| now_ms() - t > 60 * 60 * 1000);
+            if stale {
+                self.refresh_catalog(p, &key).await;
+            }
+            match p.fetch_usage(&self.http, &key).await {
+                Ok(snap) => self.record_usage(p.id(), snap),
+                Err(e) => {
+                    tracing::debug!("{} usage fetch failed: {e:#}", p.label());
+                    let msg = format!("{e:#}");
+                    let short = if msg.contains("401") || msg.contains("403") {
+                        format!(
+                            "Signed out — {} rejected the key; connect it again",
+                            p.label()
+                        )
+                    } else {
+                        format!("Couldn't read {} usage", p.label())
+                    };
+                    self.record_usage_error(p.id(), short);
+                }
             }
         }
     }
 
-    async fn poll_kimi(&self) {
-        let Some(key) = self.state.read().unwrap().kimi_key.clone() else {
-            return;
-        };
-        match kimi::fetch_usage(&self.http, &key).await {
-            Ok(snap) => self.record_usage(kimi::ID, snap),
-            Err(e) => {
-                tracing::debug!("Kimi usage fetch failed: {e:#}");
-                let msg = format!("{e:#}");
-                let short = if msg.contains("401") || msg.contains("403") {
-                    "Signed out — Kimi rejected the key; connect it again".to_string()
-                } else {
-                    "Couldn't read Kimi usage".to_string()
-                };
-                self.record_usage_error(kimi::ID, short);
-            }
-        }
-    }
-
-    /// Find an account by id, email, label (case-insensitive), or "kimi" —
-    /// for `clyde --switch <who>`.
+    /// Find an account by id, email, label (case-insensitive), or a provider
+    /// (`kimi`, optionally with a model: `kimi:k3`) — for `clyde --switch <who>`.
     pub fn resolve_account(&self, query: &str) -> Option<String> {
         let q = query.trim().to_lowercase();
-        let s = self.state.read().unwrap();
-        if q == kimi::ID && s.kimi_key.is_some() {
-            return Some(kimi::ID.to_string());
+        let (who, model) = q
+            .split_once(':')
+            .map_or((q.as_str(), None), |(w, m)| (w, Some(m)));
+        if let Some(p) = Provider::from_id(who) {
+            self.provider_key(p)?;
+            if let Some(m) = model {
+                if let Err(e) = self.set_provider_model(p, m) {
+                    tracing::warn!("--switch {query}: {e:#}");
+                }
+            }
+            return Some(p.id().to_string());
         }
+        let s = self.state.read().unwrap();
         s.accounts
             .iter()
             .find(|a| {
@@ -796,10 +1114,10 @@ impl Core {
             let mut s = self.state.write().unwrap();
             s.active_id = resolved;
         }
-        // Blanked Kimi keys only exist for sessions that saw Kimi; with none
-        // running they're clutter.
-        if !kimi_routed() && claude_sync::running_claude_sessions() == 0 {
-            if let Err(e) = claude_sync::edit_settings_env(kimi::tidy) {
+        // Blanked provider keys only exist for sessions that saw a provider;
+        // with none running they're clutter.
+        if routing::global_provider().is_none() && claude_sync::running_claude_sessions() == 0 {
+            if let Err(e) = claude_sync::edit_settings_env(crate::provider::tidy) {
                 tracing::debug!("couldn't tidy settings.json: {e:#}");
             }
         }
@@ -958,8 +1276,8 @@ impl Core {
             let mut s = self.state.write().unwrap();
             s.usage_errors.remove(account_id);
             let prev = s.usage.insert(account_id.to_string(), snap.clone());
-            let name = if account_id == kimi::ID {
-                "Kimi".to_string()
+            let name = if let Some(p) = Provider::from_id(account_id) {
+                p.label().to_string()
             } else {
                 s.accounts
                     .iter()
@@ -1029,7 +1347,7 @@ impl Core {
                 self.record_usage_error(&id, short_error(&e));
             }
         }
-        self.poll_kimi().await;
+        self.poll_providers().await;
 
         // The backfill may have just learned the active account's uuid, which
         // startup didn't have to write into Claude Code's config.
@@ -1215,11 +1533,6 @@ fn candidate<'a>(s: &'a CoreState, id: &'a str) -> Candidate<'a> {
     }
 }
 
-/// Whether `~/.claude/settings.json` currently sends Claude Code to Kimi.
-fn kimi_routed() -> bool {
-    kimi::routes_to_kimi(&claude_sync::read_settings_env())
-}
-
 fn upstream() -> String {
     std::env::var("CLYDE_UPSTREAM").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
@@ -1245,5 +1558,20 @@ fn short_error(e: &anyhow::Error) -> String {
         "Couldn't refresh the login".into()
     } else {
         "Couldn't read usage".into()
+    }
+}
+
+/// What the relay reads from Clyde for each request.
+impl crate::relay::Directory for Core {
+    fn key(&self, p: Provider) -> Option<String> {
+        self.provider_key(p)
+    }
+
+    fn selected(&self, p: Provider) -> String {
+        self.selected_model(p)
+    }
+
+    fn catalog(&self, p: Provider) -> Vec<ModelInfo> {
+        Core::catalog(self, p)
     }
 }

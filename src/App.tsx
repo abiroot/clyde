@@ -103,7 +103,7 @@ export default function App() {
           ) : page === "usage" ? (
             <UsagePage snapshot={snapshot} />
           ) : page === "sessions" ? (
-            <SessionsPage />
+            <SessionsPage snapshot={snapshot} />
           ) : page === "autoswitch" ? (
             <AutoSwitchPage snapshot={snapshot} />
           ) : page === "browser" ? (

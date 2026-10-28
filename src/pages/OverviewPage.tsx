@@ -10,6 +10,8 @@ import {
   GroupRow,
   LimitRow,
   ago,
+  contextLabel,
+  credit,
   limitRows,
   loginBroken,
   shortReset,
@@ -91,6 +93,7 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
         <Group title="Active in Claude Code">
           <div className="flex flex-col gap-4 p-4">
             <AccountHeader account={active} onRename={rename} onRemove={remove} large />
+            <ModelSelect account={active} setSnapshot={setSnapshot} />
             {active.usage.status === "rejected" && (
               <p className="text-[12px]" style={{ color: "var(--n-danger)" }}>
                 Limit reached{active.usage.resets_at ? ` · ${shortReset(active.usage.resets_at)}` : ""}
@@ -99,6 +102,11 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
             {active.usage_error && (
               <p className="text-[12px]" style={{ color: "var(--n-warn)" }}>
                 {active.usage_error}
+              </p>
+            )}
+            {active.usage.credit_usd != null && (
+              <p className="text-[13px]">
+                {credit(active.usage.credit_usd)} <span className="n-dim">credit left · billed per token</span>
               </p>
             )}
             <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
@@ -137,7 +145,7 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
                   )}
                   {loginBroken(a) ? (
                     <button className="n-plain-button" onClick={onAdd} title="Its saved login stopped working">
-                      {a.provider === "kimi" ? "Reconnect…" : "Sign in again…"}
+                      {a.provider !== "claude" ? "Reconnect…" : "Sign in again…"}
                     </button>
                   ) : (
                     <button className="n-plain-button" disabled={busyId !== null} onClick={() => switchTo(a.id)}>
@@ -145,6 +153,7 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
                     </button>
                   )}
                 </div>
+                <ModelSelect account={a} setSnapshot={setSnapshot} />
                 {!a.usage_error && a.usage.updated_at > 0 && (
                   <>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -191,7 +200,7 @@ function AccountHeader({
   const [menu, setMenu] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const kimi = account.provider === "kimi";
+  const isProvider = account.provider !== "claude";
 
   // Close like a native menu: on any click outside it, or Escape.
   useEffect(() => {
@@ -248,7 +257,10 @@ function AccountHeader({
                 .filter(Boolean)
                 .join(" · ")}
             </span>
-          ) : account.usage_error || account.usage.status === "rejected" || !account.usage.updated_at ? (
+          ) : account.usage_error ||
+            account.usage.status === "rejected" ||
+            !account.usage.updated_at ||
+            account.usage.credit_usd != null ? (
             <AccountSummary account={account} />
           ) : (
             <span className="n-dim">Tightest limit {Math.round(tightest(account) ?? 0)}%</span>
@@ -262,7 +274,7 @@ function AccountHeader({
         </button>
         {menu && (
           <div className="card absolute right-0 top-7 z-20 flex w-40 flex-col p-1 text-[13px]">
-            {!kimi && (
+            {!isProvider && (
               <button
                 className="n-menu-row !mx-0 text-left"
                 onClick={() => {
@@ -275,16 +287,62 @@ function AccountHeader({
             )}
             {confirm ? (
               <button className="n-menu-row !mx-0 text-left" style={{ color: "var(--n-danger)" }} onClick={() => onRemove(account.id)}>
-                <Trash2 size={13} /> {kimi ? "Confirm disconnect" : "Confirm remove"}
+                <Trash2 size={13} /> {isProvider ? "Confirm disconnect" : "Confirm remove"}
               </button>
             ) : (
               <button className="n-menu-row !mx-0 text-left" onClick={() => setConfirm(true)}>
-                <Trash2 size={13} /> {kimi ? "Disconnect…" : "Remove…"}
+                <Trash2 size={13} /> {isProvider ? "Disconnect…" : "Remove…"}
               </button>
             )}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** A provider's model: which one Claude Code's sessions on it use. Sessions
+ *  follow within seconds; `/model` in a session picks one for that session. */
+function ModelSelect({ account, setSnapshot }: { account: AccountView; setSnapshot: (s: AppSnapshot) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (account.provider === "claude" || account.models.length === 0) return null;
+
+  const pick = async (model: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSnapshot(await api.setProviderModel(account.provider, model));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="flex items-center gap-2 text-[12px]">
+        <span className="n-dim w-12 shrink-0">Model</span>
+        <select
+          aria-label={`${account.label} model`}
+          value={account.model ?? ""}
+          disabled={busy}
+          onChange={(e) => pick(e.target.value)}
+          className="min-w-0 flex-1 rounded-md border border-[var(--n-card-border)] bg-[var(--n-window)] px-2 py-0.5 text-[13px]"
+        >
+          {account.models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name} · {contextLabel(m.context)}
+            </option>
+          ))}
+        </select>
+      </label>
+      {error && (
+        <p className="text-[11px]" style={{ color: "var(--n-danger)" }}>
+          {error}
+        </p>
+      )}
     </div>
   );
 }

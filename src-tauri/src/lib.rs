@@ -9,10 +9,11 @@ mod commands;
 mod engine;
 mod history;
 mod import_claude;
-mod kimi;
-mod kimi_relay;
 mod model;
 mod oauth;
+mod provider;
+mod relay;
+mod routing;
 mod sessions;
 mod settings;
 mod updater;
@@ -39,7 +40,13 @@ pub fn run() {
     let core_for_exit = core.clone();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // `clyde --pin <target>` from a terminal: pin the folder it ran in.
+            if let Some(target) = pin_arg(&argv) {
+                let core = app.state::<engine::SharedCore>().inner().clone();
+                std::thread::spawn(move || cli_pin(&core, &cwd, &target));
+                return;
+            }
             // `clyde --switch <who>` from a terminal: the second process hands
             // its arguments to this one and exits.
             if let Some(who) = switch_arg(&argv) {
@@ -101,7 +108,11 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::set_active_account,
-            commands::connect_kimi,
+            commands::connect_provider,
+            commands::set_provider_model,
+            commands::get_routing,
+            commands::set_folder_pin,
+            commands::install_commands,
             commands::rename_account,
             commands::remove_account,
             commands::begin_login,
@@ -122,19 +133,28 @@ pub fn run() {
             core.detect_active();
             core.cleanup_orphan_login_dirs();
 
-            // The Kimi relay, then (if Claude Code is on Kimi) route through it.
+            // The provider relay, then (wherever Claude Code is on a provider)
+            // route through it.
             let core_for_relay = core.clone();
             tauri::async_runtime::block_on(async {
-                let key_core = core_for_relay.clone();
-                let key: kimi_relay::KeySource = std::sync::Arc::new(move || key_core.kimi_key());
-                match kimi_relay::start(core_for_relay.http.clone(), key).await {
+                let dir: std::sync::Arc<dyn relay::Directory> = core_for_relay.clone();
+                match relay::start(core_for_relay.http.clone(), dir).await {
                     Ok(()) => core_for_relay.set_relay_running(true),
-                    Err(e) => tracing::warn!("Kimi relay not started, using Kimi directly: {e:#}"),
+                    Err(e) => tracing::warn!("relay not started, using providers directly: {e:#}"),
                 }
             });
-            core.load_kimi_key();
+            core.load_provider_keys();
             core.retry_vault_load();
-            if let Some(who) = switch_arg(&std::env::args().collect::<Vec<_>>()) {
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(target) = pin_arg(&args) {
+                let cwd = std::env::current_dir()
+                    .unwrap_or_default()
+                    .display()
+                    .to_string();
+                let core = core.clone();
+                std::thread::spawn(move || cli_pin(&core, &cwd, &target));
+            }
+            if let Some(who) = switch_arg(&args) {
                 let core = core.clone();
                 tauri::async_runtime::spawn(async move { cli_switch(&core, &who).await });
             }
@@ -147,6 +167,14 @@ pub fn run() {
                     core_for_poll.poll_usage().await;
                     tokio::time::sleep(std::time::Duration::from_secs(120)).await;
                 }
+            });
+
+            // `/model` saves its pick into settings.json; catch a provider's
+            // model id there within seconds (see `Core::watch_model_setting`).
+            let core_for_watch = core.clone();
+            std::thread::spawn(move || loop {
+                core_for_watch.watch_model_setting();
+                std::thread::sleep(std::time::Duration::from_secs(3));
             });
 
             updater::spawn_background_checks(app.handle().clone(), core.clone());
@@ -316,6 +344,42 @@ fn switch_arg(argv: &[String]) -> Option<String> {
                 .flatten()
         })
     })
+}
+
+/// The target named by `--pin <target>` / `--pin=<target>`, if any.
+fn pin_arg(argv: &[String]) -> Option<String> {
+    argv.iter().enumerate().find_map(|(i, a)| {
+        a.strip_prefix("--pin=")
+            .map(str::to_string)
+            .or_else(|| (a == "--pin").then(|| argv.get(i + 1).cloned()).flatten())
+    })
+}
+
+/// Pin the folder a `clyde --pin <target>` ran in: `claude`, `kimi`,
+/// `refuseless`, or `follow` to follow Clyde's choice again.
+fn cli_pin(core: &engine::SharedCore, folder: &str, target: &str) {
+    let parsed = match target.trim().to_lowercase().as_str() {
+        "follow" | "none" | "off" | "global" => Ok(None),
+        t => routing::Target::parse(t)
+            .map(Some)
+            .ok_or_else(|| format!("No target \"{t}\" (claude, kimi, refuseless, follow).")),
+    };
+    let result = parsed.and_then(|t| {
+        core.set_folder_pin(folder, t)
+            .map(|_| t)
+            .map_err(|e| format!("{e:#}"))
+    });
+    match result {
+        Ok(t) => {
+            let what = t.map_or("Clyde's choice".to_string(), |t| t.id().to_string());
+            tracing::info!("pinned {folder} to {what} from the command line");
+            core.notify("Folder pinned", &format!("{folder} now runs on {what}."));
+        }
+        Err(e) => {
+            tracing::warn!("clyde --pin {target} in {folder}: {e}");
+            core.notify("Clyde couldn't pin the folder", &e);
+        }
+    }
 }
 
 /// Switch accounts on behalf of the command line, as if clicked (so

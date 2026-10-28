@@ -33,7 +33,7 @@ fn home() -> Result<PathBuf> {
         .map_err(|_| anyhow!("no home directory"))
 }
 
-fn claude_dir() -> Result<PathBuf> {
+pub fn claude_dir() -> Result<PathBuf> {
     Ok(home()?.join(".claude"))
 }
 
@@ -62,8 +62,14 @@ fn legacy_claude_json_path() -> Result<PathBuf> {
     Ok(claude_dir()?.join(".claude.json"))
 }
 
-fn settings_path() -> Result<PathBuf> {
+pub fn settings_path() -> Result<PathBuf> {
     Ok(claude_dir()?.join("settings.json"))
+}
+
+/// A folder's own `.claude/settings.local.json`: per-machine settings for that
+/// project, which outrank the user's and apply live to sessions running there.
+pub fn local_settings_path(folder: &Path) -> PathBuf {
+    folder.join(".claude").join("settings.local.json")
 }
 
 // ---- keychain -------------------------------------------------------------
@@ -515,8 +521,8 @@ fn cleanup_legacy_at(path: &Path, backup: &Path) -> Result<bool> {
             .and_then(|v| v.as_str())
             .is_some_and(|u| {
                 (u.contains("127.0.0.1") || u.contains("localhost"))
-                    // Clyde's own Kimi relay is current, not a leftover.
-                    && !u.contains(crate::kimi_relay::PREFIX)
+                    // Clyde's own provider relay is current, not a leftover.
+                    && crate::relay::provider_of(u).is_none()
             });
         if is_clyde_proxy {
             env.remove("ANTHROPIC_BASE_URL");
@@ -550,29 +556,47 @@ pub fn read_settings_env() -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Set keys in `settings.json`'s `env`, preserving everything else in the file.
-/// Running `claude` sessions re-read it and apply the change within seconds.
-pub fn write_settings_env(pairs: &[(&str, String)]) -> Result<()> {
-    edit_settings_env(|env| {
-        for (k, v) in pairs {
-            env.insert((*k).to_string(), Value::String(v.clone()));
-        }
-        true
-    })
-    .map(|_| ())
-}
-
 /// Apply `edit` to `settings.json`'s `env`; write only when it reports a change.
 /// An unparsable file is left alone rather than replaced.
 pub fn edit_settings_env(edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<bool> {
-    let path = settings_path()?;
-    let mut root = read_json_object(&path)?;
+    edit_settings_file(&settings_path()?, |root| edit_env(root, edit))
+}
+
+/// Read-modify-write a Claude Code settings file (user or a folder's local
+/// one). `edit` reports whether it changed anything; only then is the file
+/// written. A missing file starts empty; an unparsable one is left alone.
+pub fn edit_settings_file(
+    path: &Path,
+    edit: impl FnOnce(&mut Map<String, Value>) -> Result<bool>,
+) -> Result<bool> {
+    let mut root = read_json_object(path)?;
+    let changed = edit(&mut root)?;
+    if changed {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        write_json_atomic(path, &root)?;
+    }
+    Ok(changed)
+}
+
+/// A settings file's top level (empty when missing or unreadable).
+pub fn read_settings_file(path: &Path) -> Map<String, Value> {
+    read_json_object(path).unwrap_or_default()
+}
+
+/// Apply `edit` to a settings root's `env` object, creating it if needed and
+/// dropping it when it ends up empty.
+pub fn edit_env(
+    root: &mut Map<String, Value>,
+    edit: impl FnOnce(&mut Map<String, Value>) -> bool,
+) -> Result<bool> {
     let mut env = match root.remove("env") {
         Some(Value::Object(env)) => env,
         Some(other) => {
             root.insert("env".into(), other);
             return Err(anyhow!(
-                "settings.json has a non-object \"env\"; leaving it alone"
+                "the settings file has a non-object \"env\"; leaving it alone"
             ));
         }
         None => Map::new(),
@@ -581,10 +605,19 @@ pub fn edit_settings_env(edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> 
     if !env.is_empty() {
         root.insert("env".into(), Value::Object(env));
     }
-    if changed {
-        write_json_atomic(&path, &root)?;
-    }
     Ok(changed)
+}
+
+/// Set `pairs` in an env object; reports whether any value changed.
+pub fn set_pairs(env: &mut Map<String, Value>, pairs: &[(&str, String)]) -> bool {
+    let mut changed = false;
+    for (k, v) in pairs {
+        if env.get(*k).and_then(Value::as_str) != Some(v.as_str()) {
+            env.insert((*k).to_string(), Value::String(v.clone()));
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn read_global_config() -> Option<Value> {

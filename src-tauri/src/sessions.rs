@@ -16,6 +16,9 @@ pub struct Session {
     /// `CLAUDE_CONFIG_DIR` the session was started with, if any — a session with
     /// its own config dir isn't affected by switching in Clyde.
     pub config_dir: Option<String>,
+    /// Started on a launch pin (`--settings ~/.claude/clyde/<target>.json`):
+    /// the target it stays on whatever Clyde's global choice.
+    pub pin: Option<crate::routing::Target>,
 }
 
 pub fn list() -> Vec<Session> {
@@ -25,11 +28,15 @@ pub fn list() -> Vec<Session> {
     let mut sessions: Vec<Session> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.trim().parse::<u32>().ok())
-        .map(|pid| Session {
-            pid,
-            cwd: cwd(pid),
-            running_secs: elapsed(pid),
-            config_dir: config_dir(pid),
+        .map(|pid| {
+            let (config_dir, pin) = launch_info(pid);
+            Session {
+                pid,
+                cwd: cwd(pid),
+                running_secs: elapsed(pid),
+                config_dir,
+                pin,
+            }
         })
         .collect();
     sessions.sort_by_key(|s| s.running_secs.unwrap_or(0));
@@ -72,22 +79,48 @@ fn parse_etime(s: &str) -> Option<u64> {
     Some(days * 86_400 + h * 3_600 + m * 60 + sec)
 }
 
-/// macOS `ps -E` prints the environment after the command for the user's own
-/// processes.
-fn config_dir(pid: u32) -> Option<String> {
-    let out = Command::new("ps")
+/// The session's own `CLAUDE_CONFIG_DIR` and launch pin, from its command
+/// line (macOS `ps -E` prints the environment after the command for the
+/// user's own processes).
+fn launch_info(pid: u32) -> (Option<String>, Option<crate::routing::Target>) {
+    let Ok(out) = Command::new("ps")
         .args(["-E", "-ww", "-o", "command=", "-p", &pid.to_string()])
         .output()
-        .ok()?;
+    else {
+        return (None, None);
+    };
     let text = String::from_utf8_lossy(&out.stdout);
-    text.split_whitespace()
+    let config_dir = text
+        .split_whitespace()
         .find_map(|w| w.strip_prefix("CLAUDE_CONFIG_DIR="))
-        .map(str::to_string)
+        .map(str::to_string);
+    (config_dir, pin_of(&text))
+}
+
+/// `… --settings /Users/x/.claude/clyde/kimi.json …` → Kimi.
+fn pin_of(command: &str) -> Option<crate::routing::Target> {
+    command.split_whitespace().find_map(|w| {
+        let name = w.strip_suffix(".json")?.rsplit_once("/.claude/clyde/")?.1;
+        crate::routing::Target::parse(name)
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_etime;
+    use super::{parse_etime, pin_of};
+    use crate::routing::Target;
+
+    #[test]
+    fn reads_a_launch_pin_from_the_command_line() {
+        assert_eq!(
+            pin_of("claude --settings /Users/x/.cmuxterm/claude-settings/a.json --settings /Users/x/.claude/clyde/kimi.json"),
+            Some(Target::Kimi)
+        );
+        assert_eq!(
+            pin_of("claude --settings /Users/x/.cmuxterm/claude-settings/a.json"),
+            None
+        );
+    }
 
     #[test]
     fn parses_ps_elapsed_formats() {

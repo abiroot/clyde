@@ -77,6 +77,7 @@ pub fn parse(body: &Value) -> Option<UsageSnapshot> {
         seven_day_resets_at: seven_day.as_ref().and_then(|w| w.resets_at),
         updated_at: now_ms(),
         scoped_limits: scoped_limits(body),
+        credit_usd: None,
     })
 }
 

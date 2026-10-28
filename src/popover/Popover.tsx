@@ -7,6 +7,7 @@ import type { AccountView, BrowserStatus } from "../lib/types";
 import { UpdateBanner } from "../components/UpdateBanner";
 import {
   AccountSummary,
+  credit,
   Avatar,
   LimitRow,
   ago,
@@ -157,7 +158,12 @@ function ActiveAccount({ account }: { account: AccountView }) {
 
       {limited && (
         <p className="text-[12px]" style={{ color: "var(--n-danger)" }}>
-          Limit reached{u.resets_at ? ` · ${shortReset(u.resets_at)}` : ""}
+          {u.credit_usd != null ? "Out of credit" : `Limit reached${u.resets_at ? ` · ${shortReset(u.resets_at)}` : ""}`}
+        </p>
+      )}
+      {u.credit_usd != null && !limited && (
+        <p className="text-[12px]">
+          {credit(u.credit_usd)} <span className="n-dim">credit left · billed per token</span>
         </p>
       )}
       {account.usage_error && (

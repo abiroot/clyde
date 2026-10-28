@@ -90,6 +90,9 @@ pub struct UsageSnapshot {
     /// (e.g. "7-day · Fable") and per-product ones. Empty on older snapshots.
     #[serde(default)]
     pub scoped_limits: Vec<UsageLimit>,
+    /// Prepaid balance in USD, for providers that bill per token (Refuseless).
+    #[serde(default)]
+    pub credit_usd: Option<f64>,
 }
 
 /// One scoped limit from the usage endpoint's `limits` array.
@@ -112,8 +115,12 @@ pub struct AccountView {
     pub label: String,
     pub email: Option<String>,
     pub subscription_type: Option<String>,
-    /// "claude" or "kimi".
+    /// "claude", "kimi" or "refuseless".
     pub provider: String,
+    /// Models a provider serves (empty for Claude accounts).
+    pub models: Vec<crate::provider::ModelInfo>,
+    /// The model Clyde points Claude Code's aliases at, for a provider.
+    pub model: Option<String>,
     pub usage: UsageSnapshot,
     /// Whether this account is the one currently selected to serve traffic.
     pub is_active: bool,

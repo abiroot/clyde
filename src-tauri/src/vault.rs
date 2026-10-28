@@ -25,6 +25,13 @@ fn entry() -> Result<Entry> {
 
 /// Load all stored accounts. Returns an empty list on first run.
 pub fn load_accounts() -> Result<Vec<Account>> {
+    // Debug builds only: a test copy of Clyde (see `provider::test_keys`)
+    // starts with no Claude accounts and never saves any, so it can't touch
+    // the real list.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("CLYDE_TEST_KEYS").is_some() {
+        return Ok(Vec::new());
+    }
     let entry = entry()?;
     match entry.get_password() {
         Ok(json) => {

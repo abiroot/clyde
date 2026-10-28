@@ -1,6 +1,6 @@
 [package]
 name = "clyde"
-version = "1.2.1"
+version = "1.3.0"
 description = "Multi-account switcher for Claude Code"
 authors = ["Clyde contributors"]
 edition = "2021"
@@ -27,7 +27,7 @@ tauri-plugin-updater = "2"
 
 # --- Serialization ---
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # --- Async runtime + HTTP client ---
 tokio = { version = "1", features = ["full"] }
