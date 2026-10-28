@@ -133,6 +133,7 @@ pub fn run() {
                 }
             });
             core.load_kimi_key();
+            core.retry_vault_load();
             if let Some(who) = switch_arg(&std::env::args().collect::<Vec<_>>()) {
                 let core = core.clone();
                 tauri::async_runtime::spawn(async move { cli_switch(&core, &who).await });

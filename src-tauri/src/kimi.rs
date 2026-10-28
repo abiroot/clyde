@@ -88,6 +88,18 @@ pub fn save_key(key: &str) -> Result<()> {
         .context("saving the Kimi key to the Keychain")
 }
 
+/// Delete and re-save the key, so the Keychain item is created by Clyde itself
+/// (and its access rules follow Clyde, like the account list's). Best-effort.
+pub fn adopt_key(key: &str) {
+    if delete_key().and_then(|_| save_key(key)).is_err() {
+        // If the re-save failed after the delete, try once more so the key
+        // isn't lost.
+        if let Err(e) = save_key(key) {
+            tracing::warn!("couldn't re-save the Kimi key: {e:#}");
+        }
+    }
+}
+
 pub fn delete_key() -> Result<()> {
     match entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),

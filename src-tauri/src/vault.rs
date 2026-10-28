@@ -5,9 +5,16 @@
 //! The whole account list is serialized to a single JSON blob and stored under
 //! one keychain entry — Clyde never writes tokens to plaintext files.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::model::Account;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use keyring::Entry;
+
+/// Set once the stored list has been read. Until then saving is refused: a
+/// list that failed to load is not an empty list, and writing one would wipe
+/// every saved account.
+static LOADED: AtomicBool = AtomicBool::new(false);
 
 const SERVICE: &str = "com.clyde.app";
 const ACCOUNT_KEY: &str = "accounts-v1";
@@ -23,19 +30,31 @@ pub fn load_accounts() -> Result<Vec<Account>> {
         Ok(json) => {
             let accounts: Vec<Account> =
                 serde_json::from_str(&json).context("deserializing accounts from keychain")?;
+            LOADED.store(true, Ordering::SeqCst);
             Ok(accounts)
         }
-        Err(keyring::Error::NoEntry) => Ok(Vec::new()),
+        Err(keyring::Error::NoEntry) => {
+            LOADED.store(true, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
         Err(e) => Err(e).context("reading accounts from keychain"),
     }
 }
 
 /// Persist the full account list, replacing whatever was there.
 pub fn save_accounts(accounts: &[Account]) -> Result<()> {
+    if !LOADED.load(Ordering::SeqCst) {
+        bail!("the saved accounts haven't been read from the Keychain yet; not overwriting them");
+    }
     let json = serde_json::to_string(accounts).context("serializing accounts")?;
     entry()?
         .set_password(&json)
         .context("writing accounts to keychain")
+}
+
+/// Whether the stored list has been read (see [`LOADED`]).
+pub fn is_loaded() -> bool {
+    LOADED.load(Ordering::SeqCst)
 }
 
 /// Remove the keychain entry entirely (used by "reset / sign out of everything").

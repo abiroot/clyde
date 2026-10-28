@@ -78,7 +78,17 @@ pub struct SwitchEvent {
 
 impl Core {
     pub fn new() -> Result<SharedCore> {
-        let accounts = vault::load_accounts()?;
+        // A Keychain read can fail right after an update (macOS has to approve
+        // the new binary, and can't ask while the old one is relaunching it).
+        // Start anyway with nothing loaded — saving stays blocked until the
+        // real list arrives — and keep retrying in the background.
+        let accounts = match vault::load_accounts() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("couldn't read saved accounts yet, will retry: {e:#}");
+                Vec::new()
+            }
+        };
         let active_id = accounts.first().map(|a| a.id.clone());
         let http = reqwest::Client::builder()
             .use_rustls_tls()
@@ -530,6 +540,29 @@ impl Core {
         Ok(())
     }
 
+    /// Keep trying to read the saved accounts if startup couldn't; once they
+    /// load, take over as if they'd been there all along.
+    pub fn retry_vault_load(self: &Arc<Self>) {
+        if vault::is_loaded() {
+            return;
+        }
+        let core = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            match vault::load_accounts() {
+                Ok(accounts) => {
+                    tracing::info!("read {} saved accounts from the Keychain", accounts.len());
+                    core.state.write().unwrap().accounts = accounts;
+                    core.detect_active();
+                    let c = core.clone();
+                    tauri::async_runtime::spawn(async move { c.poll_usage().await });
+                    return;
+                }
+                Err(e) => tracing::debug!("saved accounts still unreadable: {e:#}"),
+            }
+        });
+    }
+
     /// Read the Kimi key from the Keychain in the background, then route
     /// Claude Code through the relay if it's on Kimi. A Keychain read can wait
     /// on a permission prompt (after an update changes Clyde's signature), and
@@ -537,11 +570,14 @@ impl Core {
     pub fn load_kimi_key(self: &Arc<Self>) {
         let core = self.clone();
         std::thread::spawn(move || {
-            let key = kimi::key();
-            if key.is_none() {
+            let Some(key) = kimi::key() else {
                 return;
-            }
-            core.state.write().unwrap().kimi_key = key;
+            };
+            // Re-create the item as Clyde's own (the way the account list is
+            // stored), so it stays readable across updates even if something
+            // else created it.
+            kimi::adopt_key(&key);
+            core.state.write().unwrap().kimi_key = Some(key);
             core.detect_active();
             core.refresh_kimi_route();
             core.emit();

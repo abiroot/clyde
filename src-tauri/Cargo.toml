@@ -1,6 +1,6 @@
 [package]
 name = "clyde"
-version = "1.2.0"
+version = "1.2.1"
 description = "Multi-account switcher for Claude Code"
 authors = ["Clyde contributors"]
 edition = "2021"
