@@ -47,6 +47,8 @@ account — whether or not Clyde is running.
 | `chrome_link.rs` | Read which claude.ai account the Claude-in-Chrome extension is signed into, so the UI can explain why `/chrome` stopped working after a switch. |
 | `browser.rs` | Optional account-independent browser tools: find Chrome profiles carrying the Playwright Extension, read its connection token, register Playwright MCP at user scope, and test the connection end to end. |
 | `autoswitch.rs` | Pure decision for automatic switching: rules, priority, exclusions, switch-back with headroom. |
+| `kimi.rs` | Kimi Code as a provider: key in the Keychain, the `settings.json` env that routes Claude Code to Kimi (on / blanked / tidied), plan usage from Kimi's usage endpoint. |
+| `kimi_relay.rs` | Localhost relay (127.0.0.1:47311) used while Kimi is active: strips content Kimi rejects (e.g. `tool_addition`) from requests and injects the key. |
 | `updater.rs` | Signed self-updates: background checks against GitHub releases, one-click install + relaunch. |
 | `commands.rs` | Tauri commands exposed to the UI (the only Rust↔JS surface). |
 | `lib.rs` | App wiring: plugins, tray, window behavior, the usage-poll loop. |
@@ -201,3 +203,35 @@ forced logout. Everything below exists to keep all copies on the latest generati
 
 The UI never sees tokens — only `AccountView` DTOs, pushed over the
 `clyde://update` Tauri event.
+
+## Kimi Code
+
+Kimi isn't an OAuth account: it's a key (Keychain item `Clyde Kimi`) and a
+route. `set_active("kimi")` writes `kimi::env_on_relay()` into
+`~/.claude/settings.json`'s `env`; switching to a Claude account writes the
+keychain as usual and then `kimi::env_off()` (the same keys, **empty**).
+`Core::effective_active` reports Kimi whenever that env routes there, since the
+keychain still holds the last Claude login.
+
+Why this reaches running sessions (verified against Claude Code 2.1.312 with
+live PTY sessions and mock servers): Claude Code watches `settings.json`, and on
+an `env` change re-applies it into `process.env` and clears its auth caches; its
+API client is rebuilt per request from `process.env`. Object.assign semantics
+mean a removed key is never unset — hence blanking, and `kimi::tidy` once no
+`claude` is running. Model aliases (`ANTHROPIC_DEFAULT_*_MODEL`) remap live; a
+model pinned at launch doesn't (Kimi accepts Claude model names anyway).
+
+A session that began on Anthropic has `tool_addition` blocks in its history
+(tools loaded mid-conversation); Kimi rejects any request containing one with
+`400 Invalid request` (found by capturing and bisecting a real request). The
+relay (`kimi_relay.rs`) removes unsupported content blocks and empty messages,
+swaps the placeholder token for the real key, and streams the response back.
+`Core::on_exit` re-points a relayed route straight at Kimi when Clyde quits;
+`refresh_kimi_route` moves it back onto the relay at launch.
+`cleanup_legacy_integration` (which strips stale localhost base URLs) spares
+the relay's `/kimi` URL.
+
+`clyde --switch <who>` reaches the running instance through the single-instance
+plugin; the switch runs on its own thread because the plugin's accept loop
+blocks the runtime worker that would otherwise run it.
+

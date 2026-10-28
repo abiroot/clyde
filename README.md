@@ -80,6 +80,11 @@ install the extension from the Chrome Web Store; Clyde reads its connection
 token from Chrome and registers the server with Claude Code. See
 [Browser tools](#browser-tools) below.
 
+**Kimi Code (optional).** Connect a Kimi Code membership and Kimi's K3.1 Pro
+appears as one more account: one click (or auto-switch) moves Claude Code onto
+it — running sessions included, within seconds — and back. Your skills, MCP
+servers and memory stay; only the model changes. See [Kimi](#kimi-code).
+
 **Auto-switch (optional).** Clyde can move Claude Code to another account by
 itself when the active one reaches a limit — and back once your preferred
 account resets. See [Auto-switch](#auto-switch) below.
@@ -143,6 +148,36 @@ Off by default; turn it on in the **Auto-switch** page.
 - A switch is announced with a notification. When no account has room, Clyde
   says so once and waits. Usage is checked every 2 minutes; running `claude`
   sessions follow a switch within ~30 seconds.
+
+## Kimi Code
+
+Optional. **Add account → Kimi**, paste a key from the
+[Kimi Code console](https://www.kimi.com/code/console) (Plus plan or higher;
+usage counts against the plan, not per token). Kimi then has a card with its
+5-hour and monthly limits, a **Use** button, and a place in the auto-switch
+priority list (last by default, so Clyde returns to Claude as soon as an
+account has room).
+
+- **How the switch works.** Claude Code is pointed at Kimi through the `env`
+  block of `~/.claude/settings.json` (base URL, token, every model alias set to
+  `k3.1-pro`, a 256K context limit). Claude Code re-reads that file while it
+  runs, so sessions already open follow within ~5 seconds, conversation intact.
+  Switching back blanks the same keys; Clyde removes them once no session is
+  running.
+- **The relay.** A session that began on Anthropic carries content Kimi refuses
+  (tool lists added mid-conversation). While Kimi is active, Claude Code talks
+  to a small relay inside Clyde on `127.0.0.1:47311`, which strips that content
+  and adds the key — so the key isn't written to settings.json either. If Clyde
+  quits while Kimi is active, sessions are pointed straight at Kimi instead
+  (new sessions keep working; old ones may need restarting).
+- **Limits of the switch.** A session started with a fixed model id
+  (`--model claude-…`) keeps that name (Kimi accepts it); one in a folder you
+  haven't trusted only picks up the change when restarted. The first message
+  after a switch re-sends the conversation without the prompt cache. While on
+  Kimi, Claude Code labels the session "API Usage Billing"; Kimi still bills
+  your plan.
+- **From the terminal:** `Clyde.app/Contents/MacOS/clyde --switch kimi` (or an
+  email / label) switches the running Clyde, as if clicked.
 
 ## Browser tools
 

@@ -137,7 +137,7 @@ export function OverviewPage({ snapshot, setSnapshot, browserReady, onOpenBrowse
                   )}
                   {loginBroken(a) ? (
                     <button className="n-plain-button" onClick={onAdd} title="Its saved login stopped working">
-                      Sign in again…
+                      {a.provider === "kimi" ? "Reconnect…" : "Sign in again…"}
                     </button>
                   ) : (
                     <button className="n-plain-button" disabled={busyId !== null} onClick={() => switchTo(a.id)}>
@@ -191,6 +191,7 @@ function AccountHeader({
   const [menu, setMenu] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const kimi = account.provider === "kimi";
 
   // Close like a native menu: on any click outside it, or Escape.
   useEffect(() => {
@@ -261,22 +262,24 @@ function AccountHeader({
         </button>
         {menu && (
           <div className="card absolute right-0 top-7 z-20 flex w-40 flex-col p-1 text-[13px]">
-            <button
-              className="n-menu-row !mx-0 text-left"
-              onClick={() => {
-                setEditing(true);
-                setMenu(false);
-              }}
-            >
-              <Pencil size={13} /> Rename
-            </button>
+            {!kimi && (
+              <button
+                className="n-menu-row !mx-0 text-left"
+                onClick={() => {
+                  setEditing(true);
+                  setMenu(false);
+                }}
+              >
+                <Pencil size={13} /> Rename
+              </button>
+            )}
             {confirm ? (
               <button className="n-menu-row !mx-0 text-left" style={{ color: "var(--n-danger)" }} onClick={() => onRemove(account.id)}>
-                <Trash2 size={13} /> Confirm remove
+                <Trash2 size={13} /> {kimi ? "Confirm disconnect" : "Confirm remove"}
               </button>
             ) : (
               <button className="n-menu-row !mx-0 text-left" onClick={() => setConfirm(true)}>
-                <Trash2 size={13} /> Remove…
+                <Trash2 size={13} /> {kimi ? "Disconnect…" : "Remove…"}
               </button>
             )}
           </div>

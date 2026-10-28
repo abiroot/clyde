@@ -226,6 +226,15 @@ pub async fn set_active_account(
     })
 }
 
+/// Connect Kimi Code with a key from its console (checked with Kimi first).
+#[tauri::command]
+pub async fn connect_kimi(core: State<'_, SharedCore>, key: String) -> CmdResult<AppSnapshot> {
+    core.connect_kimi(&key)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(core.snapshot())
+}
+
 #[tauri::command]
 pub fn rename_account(
     core: State<SharedCore>,

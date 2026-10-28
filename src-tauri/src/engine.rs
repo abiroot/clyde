@@ -16,7 +16,7 @@ use crate::history::{History, Point};
 use crate::model::*;
 use crate::settings::Settings;
 use crate::updater::UpdateInfo;
-use crate::{alerts, chrome_link, claude_sync, import_claude, oauth, settings, vault};
+use crate::{alerts, chrome_link, claude_sync, import_claude, kimi, oauth, settings, vault};
 
 /// The tray icon's id (see `lib.rs`), for the menubar readout.
 pub const TRAY_ID: &str = "clyde-tray";
@@ -44,6 +44,8 @@ pub struct Core {
     history: RwLock<History>,
     /// A newer Clyde release, once the updater has found one.
     update: RwLock<Option<UpdateInfo>>,
+    /// The localhost Kimi relay is listening.
+    relay_up: std::sync::atomic::AtomicBool,
 }
 
 struct CoreState {
@@ -58,6 +60,9 @@ struct CoreState {
     last_switch: Option<SwitchEvent>,
     /// Already told the user every account is used up (once per episode).
     exhausted_notified: bool,
+    /// The Kimi Code key, when Kimi is connected. Kimi isn't stored with the
+    /// Claude accounts: it has no OAuth to refresh, only this key.
+    kimi_key: Option<String>,
 }
 
 /// One automatic switch.
@@ -88,6 +93,7 @@ impl Core {
             prefs: RwLock::new(Settings::default()),
             history: RwLock::new(History::default()),
             update: RwLock::new(None),
+            relay_up: std::sync::atomic::AtomicBool::new(false),
             state: RwLock::new(CoreState {
                 accounts,
                 usage: HashMap::new(),
@@ -96,6 +102,9 @@ impl Core {
                 manual_hold: false,
                 last_switch: None,
                 exhausted_notified: false,
+                // Loaded off the startup path (see `load_kimi_key`): a Keychain
+                // prompt must never hold the app up.
+                kimi_key: None,
             }),
         }))
     }
@@ -163,12 +172,16 @@ impl Core {
     pub fn snapshot(&self) -> AppSnapshot {
         let s = self.state.read().unwrap();
         let active_id = s.active_id.clone();
-        let active_email = active_id
-            .as_ref()
-            .and_then(|id| s.accounts.iter().find(|a| &a.id == id))
-            .and_then(|a| a.email.clone());
+        let active_email = if active_id.as_deref() == Some(kimi::ID) {
+            Some("Kimi".to_string())
+        } else {
+            active_id
+                .as_ref()
+                .and_then(|id| s.accounts.iter().find(|a| &a.id == id))
+                .and_then(|a| a.email.clone())
+        };
 
-        let accounts = s
+        let mut accounts: Vec<AccountView> = s
             .accounts
             .iter()
             .map(|a| AccountView {
@@ -176,12 +189,26 @@ impl Core {
                 label: a.label.clone(),
                 email: a.email.clone(),
                 subscription_type: a.subscription_type.clone(),
+                provider: "claude".into(),
                 usage: s.usage.get(&a.id).cloned().unwrap_or_default(),
                 is_active: Some(&a.id) == active_id.as_ref(),
                 usage_error: s.usage_errors.get(&a.id).cloned(),
                 forecasts: self.history.read().unwrap().forecasts(&a.id, now_ms()),
             })
             .collect();
+        if s.kimi_key.is_some() {
+            accounts.push(AccountView {
+                id: kimi::ID.into(),
+                label: "Kimi".into(),
+                email: None,
+                subscription_type: Some(format!("Kimi Code · {}", kimi::MODEL)),
+                provider: "kimi".into(),
+                usage: s.usage.get(kimi::ID).cloned().unwrap_or_default(),
+                is_active: active_id.as_deref() == Some(kimi::ID),
+                usage_error: s.usage_errors.get(kimi::ID).cloned(),
+                forecasts: self.history.read().unwrap().forecasts(kimi::ID, now_ms()),
+            });
+        }
 
         AppSnapshot {
             accounts,
@@ -223,6 +250,9 @@ impl Core {
     }
 
     pub fn remove_account(&self, id: &str) -> Result<()> {
+        if id == kimi::ID {
+            return self.disconnect_kimi();
+        }
         {
             let mut s = self.state.write().unwrap();
             s.accounts.retain(|a| a.id != id);
@@ -238,6 +268,9 @@ impl Core {
     }
 
     pub fn rename_account(&self, id: &str, label: &str) -> Result<()> {
+        if id == kimi::ID {
+            return Ok(());
+        }
         {
             let mut s = self.state.write().unwrap();
             if let Some(a) = s.accounts.iter_mut().find(|a| a.id == id) {
@@ -264,6 +297,26 @@ impl Core {
         // it belongs to — Claude Code may have rotated it since we wrote it,
         // and the rotation would be lost once we overwrite the slot.
         self.adopt_active_slot();
+
+        if id == kimi::ID {
+            let key = self
+                .state
+                .read()
+                .unwrap()
+                .kimi_key
+                .clone()
+                .ok_or_else(|| anyhow!("Kimi isn't connected"))?;
+            // The keychain slot stays on the last Claude account: Claude Code
+            // still uses it for claude.ai services, and switching back is then
+            // just a matter of clearing the env again.
+            let _ = key; // the relay supplies it; settings.json gets a placeholder
+            claude_sync::write_settings_env(&self.kimi_env())
+                .context("pointing Claude Code at Kimi in settings.json")?;
+            self.state.write().unwrap().active_id = Some(kimi::ID.to_string());
+            self.update_tray_readout();
+            self.emit();
+            return Ok(());
+        }
 
         // If the user ran `claude` against this account's source config dir,
         // that dir holds a newer credential than ours; adopt it.
@@ -292,6 +345,12 @@ impl Core {
             .ok_or_else(|| anyhow!("unknown account {id}"))?;
         claude_sync::activate(&account)
             .context("writing the account into Claude Code's keychain")?;
+        // Leaving Kimi: blank its env so running sessions drop back to the
+        // keychain login (deleting the keys wouldn't reach them).
+        if kimi_routed() {
+            claude_sync::write_settings_env(&kimi::env_off())
+                .context("switching Claude Code back from Kimi in settings.json")?;
+        }
         {
             let mut s = self.state.write().unwrap();
             s.active_id = Some(id.to_string());
@@ -320,21 +379,11 @@ impl Core {
         }
         let (decision, active, names) = {
             let s = self.state.read().unwrap();
-            let candidates: Vec<Candidate> = s
-                .accounts
-                .iter()
-                .map(|a| Candidate {
-                    id: &a.id,
-                    usage: s
-                        .usage
-                        .get(&a.id)
-                        .filter(|_| !s.usage_errors.contains_key(&a.id)),
-                    healthy: !s
-                        .usage_errors
-                        .get(&a.id)
-                        .is_some_and(|e| e.contains("refresh") || e.contains("Signed out")),
-                })
-                .collect();
+            let mut candidates: Vec<Candidate> =
+                s.accounts.iter().map(|a| candidate(&s, &a.id)).collect();
+            if s.kimi_key.is_some() {
+                candidates.push(candidate(&s, kimi::ID));
+            }
             let decision = autoswitch::decide(
                 &cfg,
                 s.active_id.as_deref(),
@@ -342,7 +391,7 @@ impl Core {
                 s.manual_hold,
                 now_ms(),
             );
-            let names: HashMap<String, String> = s
+            let mut names: HashMap<String, String> = s
                 .accounts
                 .iter()
                 .map(|a| {
@@ -352,6 +401,7 @@ impl Core {
                     )
                 })
                 .collect();
+            names.insert(kimi::ID.to_string(), "Kimi".to_string());
             (decision, s.active_id.clone(), names)
         };
         let Some(from) = active else { return };
@@ -426,6 +476,166 @@ impl Core {
                 self.emit();
             }
         }
+    }
+
+    // ---- Kimi -------------------------------------------------------------
+
+    /// The account to report as active: Kimi while settings.json routes Claude
+    /// Code there (the keychain then still holds the last Claude login), else
+    /// whoever owns the keychain slot.
+    fn effective_active(&self, keychain_owner: Option<String>) -> Option<String> {
+        let connected = self.state.read().unwrap().kimi_key.is_some();
+        if connected && kimi_routed() {
+            Some(kimi::ID.to_string())
+        } else {
+            keychain_owner
+        }
+    }
+
+    /// Connect Kimi with a Kimi Code key, after checking Kimi accepts it.
+    pub async fn connect_kimi(&self, raw_key: &str) -> Result<()> {
+        let key = kimi::normalize_key(raw_key)?;
+        let usage = kimi::verify_key(&self.http, &key).await?;
+        kimi::save_key(&key)?;
+        {
+            let mut s = self.state.write().unwrap();
+            s.kimi_key = Some(key.clone());
+            s.usage_errors.remove(kimi::ID);
+        }
+        // A replaced key must reach settings.json too, or Kimi sessions keep
+        // sending the old one.
+        if kimi_routed() {
+            claude_sync::write_settings_env(&self.kimi_env())?;
+        }
+        self.record_usage(kimi::ID, usage);
+        Ok(())
+    }
+
+    /// Forget the Kimi key; if Claude Code was on Kimi, put it back on the
+    /// keychain login.
+    fn disconnect_kimi(&self) -> Result<()> {
+        if kimi_routed() {
+            claude_sync::write_settings_env(&kimi::env_off())?;
+        }
+        kimi::delete_key()?;
+        {
+            let mut s = self.state.write().unwrap();
+            s.kimi_key = None;
+            s.usage.remove(kimi::ID);
+            s.usage_errors.remove(kimi::ID);
+        }
+        let owner = self.adopt_active_slot();
+        self.state.write().unwrap().active_id = owner;
+        self.emit();
+        Ok(())
+    }
+
+    /// Read the Kimi key from the Keychain in the background, then route
+    /// Claude Code through the relay if it's on Kimi. A Keychain read can wait
+    /// on a permission prompt (after an update changes Clyde's signature), and
+    /// that must not stall startup.
+    pub fn load_kimi_key(self: &Arc<Self>) {
+        let core = self.clone();
+        std::thread::spawn(move || {
+            let key = kimi::key();
+            if key.is_none() {
+                return;
+            }
+            core.state.write().unwrap().kimi_key = key;
+            core.detect_active();
+            core.refresh_kimi_route();
+            core.emit();
+        });
+    }
+
+    /// The connected Kimi key, for the relay.
+    pub fn kimi_key(&self) -> Option<String> {
+        self.state.read().unwrap().kimi_key.clone()
+    }
+
+    /// Note whether the relay is up; Kimi env written from now on uses it.
+    pub fn set_relay_running(&self, up: bool) {
+        self.relay_up
+            .store(up, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Env for "Claude Code on Kimi": through the relay when it's up, else
+    /// direct (new sessions still work; mid-conversation moves may not).
+    fn kimi_env(&self) -> Vec<(&'static str, String)> {
+        let relay = self.relay_up.load(std::sync::atomic::Ordering::Relaxed);
+        match (relay, self.kimi_key()) {
+            (false, Some(key)) => kimi::env_on_direct(&key),
+            _ => kimi::env_on_relay(),
+        }
+    }
+
+    /// At launch: if Claude Code is on Kimi, route it through the relay (or
+    /// direct, if the relay couldn't start) — whichever this run provides.
+    pub fn refresh_kimi_route(&self) {
+        let env = claude_sync::read_settings_env();
+        if self.kimi_key().is_none() || !kimi::routes_to_kimi(&env) {
+            return;
+        }
+        let want_relay = self.relay_up.load(std::sync::atomic::Ordering::Relaxed);
+        if kimi::via_relay(&env) != want_relay {
+            if let Err(e) = claude_sync::write_settings_env(&self.kimi_env()) {
+                tracing::warn!("couldn't update the Kimi route: {e:#}");
+            }
+        }
+    }
+
+    /// Clyde is quitting: its relay goes with it, so a Kimi route through the
+    /// relay is switched to direct.
+    pub fn on_exit(&self) {
+        let env = claude_sync::read_settings_env();
+        if !kimi::via_relay(&env) {
+            return;
+        }
+        if let Some(key) = self.kimi_key() {
+            match claude_sync::write_settings_env(&kimi::env_on_direct(&key)) {
+                Ok(()) => {
+                    tracing::info!("Clyde is quitting: pointed Kimi sessions straight at Kimi")
+                }
+                Err(e) => tracing::warn!("couldn't hand Kimi sessions over before quitting: {e:#}"),
+            }
+        }
+    }
+
+    async fn poll_kimi(&self) {
+        let Some(key) = self.state.read().unwrap().kimi_key.clone() else {
+            return;
+        };
+        match kimi::fetch_usage(&self.http, &key).await {
+            Ok(snap) => self.record_usage(kimi::ID, snap),
+            Err(e) => {
+                tracing::debug!("Kimi usage fetch failed: {e:#}");
+                let msg = format!("{e:#}");
+                let short = if msg.contains("401") || msg.contains("403") {
+                    "Signed out — Kimi rejected the key; connect it again".to_string()
+                } else {
+                    "Couldn't read Kimi usage".to_string()
+                };
+                self.record_usage_error(kimi::ID, short);
+            }
+        }
+    }
+
+    /// Find an account by id, email, label (case-insensitive), or "kimi" —
+    /// for `clyde --switch <who>`.
+    pub fn resolve_account(&self, query: &str) -> Option<String> {
+        let q = query.trim().to_lowercase();
+        let s = self.state.read().unwrap();
+        if q == kimi::ID && s.kimi_key.is_some() {
+            return Some(kimi::ID.to_string());
+        }
+        s.accounts
+            .iter()
+            .find(|a| {
+                a.id.to_lowercase() == q
+                    || a.email.as_deref().is_some_and(|e| e.to_lowercase() == q)
+                    || a.label.to_lowercase() == q
+            })
+            .map(|a| a.id.clone())
     }
 
     // ---- updates ----------------------------------------------------------
@@ -545,10 +755,17 @@ impl Core {
 
         // No "first account" fallback: claiming an account is active while the
         // keychain actually holds someone else's login is how tokens cross.
-        let resolved = self.adopt_active_slot();
+        let resolved = self.effective_active(self.adopt_active_slot());
         {
             let mut s = self.state.write().unwrap();
             s.active_id = resolved;
+        }
+        // Blanked Kimi keys only exist for sessions that saw Kimi; with none
+        // running they're clutter.
+        if !kimi_routed() && claude_sync::running_claude_sessions() == 0 {
+            if let Err(e) = claude_sync::edit_settings_env(kimi::tidy) {
+                tracing::debug!("couldn't tidy settings.json: {e:#}");
+            }
         }
         self.repair_active_identity();
         self.emit();
@@ -705,12 +922,15 @@ impl Core {
             let mut s = self.state.write().unwrap();
             s.usage_errors.remove(account_id);
             let prev = s.usage.insert(account_id.to_string(), snap.clone());
-            let name = s
-                .accounts
-                .iter()
-                .find(|a| a.id == account_id)
-                .map(|a| a.email.clone().unwrap_or_else(|| a.label.clone()))
-                .unwrap_or_default();
+            let name = if account_id == kimi::ID {
+                "Kimi".to_string()
+            } else {
+                s.accounts
+                    .iter()
+                    .find(|a| a.id == account_id)
+                    .map(|a| a.email.clone().unwrap_or_else(|| a.label.clone()))
+                    .unwrap_or_default()
+            };
             (prev, name, s.active_id.as_deref() == Some(account_id))
         };
 
@@ -745,7 +965,7 @@ impl Core {
     pub async fn poll_usage(&self) {
         // Keep our copy of the active slot current with claude's own rotations,
         // and follow along if the user switched accounts via `claude /login`.
-        if let Some(id) = self.adopt_active_slot() {
+        if let Some(id) = self.effective_active(self.adopt_active_slot()) {
             let changed = {
                 let mut s = self.state.write().unwrap();
                 if s.active_id.as_deref() != Some(id.as_str()) {
@@ -773,6 +993,7 @@ impl Core {
                 self.record_usage_error(&id, short_error(&e));
             }
         }
+        self.poll_kimi().await;
 
         // The backfill may have just learned the active account's uuid, which
         // startup didn't have to write into Claude Code's config.
@@ -943,6 +1164,24 @@ impl Core {
         }
         vault::save_accounts(&s.accounts)
     }
+}
+
+/// What auto-switch knows about one account: its latest clean reading and
+/// whether its login still works.
+fn candidate<'a>(s: &'a CoreState, id: &'a str) -> Candidate<'a> {
+    Candidate {
+        id,
+        usage: s.usage.get(id).filter(|_| !s.usage_errors.contains_key(id)),
+        healthy: !s
+            .usage_errors
+            .get(id)
+            .is_some_and(|e| e.contains("refresh") || e.contains("Signed out")),
+    }
+}
+
+/// Whether `~/.claude/settings.json` currently sends Claude Code to Kimi.
+fn kimi_routed() -> bool {
+    kimi::routes_to_kimi(&claude_sync::read_settings_env())
 }
 
 fn upstream() -> String {

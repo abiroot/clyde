@@ -112,6 +112,8 @@ pub struct AccountView {
     pub label: String,
     pub email: Option<String>,
     pub subscription_type: Option<String>,
+    /// "claude" or "kimi".
+    pub provider: String,
     pub usage: UsageSnapshot,
     /// Whether this account is the one currently selected to serve traffic.
     pub is_active: bool,

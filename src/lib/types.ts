@@ -24,6 +24,8 @@ export interface AccountView {
   label: string;
   email: string | null;
   subscription_type: string | null;
+  /** "claude", or "kimi" for Kimi Code (switched via settings.json, not a login). */
+  provider: "claude" | "kimi";
   usage: UsageSnapshot;
   is_active: boolean;
   /** Why the last usage read failed, when it did. */

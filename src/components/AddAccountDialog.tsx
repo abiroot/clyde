@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Globe,
   Copy,
+  KeyRound,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../lib/api";
@@ -20,7 +21,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Tab = "claude" | "browser" | "new" | "token";
+type Tab = "claude" | "browser" | "new" | "token" | "kimi";
 
 export function AddAccountDialog({ onDone, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("claude");
@@ -31,7 +32,7 @@ export function AddAccountDialog({ onDone, onClose }: Props) {
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center">
       <div className="card no-drag fade-in m-3 w-full max-w-[420px] overflow-hidden">
         <div className="flex items-center justify-between border-b border-[var(--color-border-soft)] px-4 py-3">
-          <span className="text-sm font-semibold">Add a Claude account</span>
+          <span className="text-sm font-semibold">Add an account</span>
           <button
             onClick={onClose}
             className="rounded-lg p-1 text-[var(--color-ink-faint)] hover:bg-white/5"
@@ -53,6 +54,9 @@ export function AddAccountDialog({ onDone, onClose }: Props) {
           <TabButton active={tab === "token"} onClick={() => setTab("token")}>
             <ClipboardPaste size={14} /> Token
           </TabButton>
+          <TabButton active={tab === "kimi"} onClick={() => setTab("kimi")}>
+            <KeyRound size={14} /> Kimi
+          </TabButton>
         </div>
 
         <div className="flex flex-col gap-3 p-4">
@@ -67,6 +71,9 @@ export function AddAccountDialog({ onDone, onClose }: Props) {
           )}
           {tab === "token" && (
             <TokenTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+          )}
+          {tab === "kimi" && (
+            <KimiTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
           )}
 
           {error && (
@@ -463,6 +470,58 @@ function TokenTab({ busy, setBusy, setError, onDone }: TabProps) {
         className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-40"
       >
         {busy ? "Importing…" : "Import account"}
+      </button>
+    </>
+  );
+}
+
+/** Kimi Code: no sign-in to borrow, just the key from its console. The key is
+ *  checked with Kimi, then kept in the Keychain. */
+function KimiTab({ busy, setBusy, setError, onDone }: TabProps) {
+  const [key, setKey] = useState("");
+
+  const submit = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      onDone(await api.connectKimi(key.trim()));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <p className="text-xs leading-relaxed text-[var(--color-ink-soft)]">
+        Use your Kimi Code membership (Plus or higher) in Claude Code. Create a key in the Kimi Code console and
+        paste it here. Usage counts against your plan, not per token. Switching to Kimi keeps your skills, MCP
+        servers and memory; it only changes the model behind Claude Code.
+      </p>
+      <button
+        onClick={() => openUrl("https://www.kimi.com/code/console")}
+        className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium hover:bg-white/5"
+      >
+        <Globe size={13} /> Open the Kimi Code console
+      </button>
+      <Field label="Kimi Code key">
+        <input
+          type="password"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="sk-kimi-…"
+          spellCheck={false}
+          autoComplete="off"
+          className="w-full rounded-lg bg-[var(--color-surface-2)] px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-[var(--color-clay)]/50"
+        />
+      </Field>
+      <button
+        disabled={busy || !key.trim()}
+        onClick={submit}
+        className="rounded-xl bg-[var(--color-clay)] px-3 py-2.5 text-sm font-semibold text-[var(--n-on-accent,#1a0f0a)] hover:opacity-90 disabled:opacity-40"
+      >
+        {busy ? "Checking with Kimi…" : "Connect Kimi"}
       </button>
     </>
   );

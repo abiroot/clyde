@@ -9,6 +9,8 @@ mod commands;
 mod engine;
 mod history;
 mod import_claude;
+mod kimi;
+mod kimi_relay;
 mod model;
 mod oauth;
 mod sessions;
@@ -34,9 +36,23 @@ pub fn run() {
         .try_init();
 
     let core = Core::new().expect("failed to initialize Clyde engine");
+    let core_for_exit = core.clone();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // `clyde --switch <who>` from a terminal: the second process hands
+            // its arguments to this one and exits.
+            if let Some(who) = switch_arg(&argv) {
+                let core = app.state::<engine::SharedCore>().inner().clone();
+                // Not `async_runtime::spawn`: this callback runs on a runtime
+                // worker the plugin keeps blocked in `accept()`, and a task
+                // spawned from it would wait in that worker's queue until the
+                // *next* connection arrived (seen live: every switch one behind).
+                std::thread::spawn(move || {
+                    tauri::async_runtime::block_on(cli_switch(&core, &who));
+                });
+                return;
+            }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.set_focus();
@@ -85,6 +101,7 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::set_active_account,
+            commands::connect_kimi,
             commands::rename_account,
             commands::remove_account,
             commands::begin_login,
@@ -104,6 +121,22 @@ pub fn run() {
             }
             core.detect_active();
             core.cleanup_orphan_login_dirs();
+
+            // The Kimi relay, then (if Claude Code is on Kimi) route through it.
+            let core_for_relay = core.clone();
+            tauri::async_runtime::block_on(async {
+                let key_core = core_for_relay.clone();
+                let key: kimi_relay::KeySource = std::sync::Arc::new(move || key_core.kimi_key());
+                match kimi_relay::start(core_for_relay.http.clone(), key).await {
+                    Ok(()) => core_for_relay.set_relay_running(true),
+                    Err(e) => tracing::warn!("Kimi relay not started, using Kimi directly: {e:#}"),
+                }
+            });
+            core.load_kimi_key();
+            if let Some(who) = switch_arg(&std::env::args().collect::<Vec<_>>()) {
+                let core = core.clone();
+                tauri::async_runtime::spawn(async move { cli_switch(&core, &who).await });
+            }
 
             // Poll usage so the gauges fill even when no traffic flows: once now,
             // then on a steady interval.
@@ -154,8 +187,13 @@ pub fn run() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Clyde");
+        .build(tauri::generate_context!())
+        .expect("error while building Clyde")
+        .run(move |_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                core_for_exit.on_exit();
+            }
+        });
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -266,6 +304,36 @@ fn toggle_popover(app: &tauri::AppHandle, tray: Rect) {
     let _ = pop.set_position(PhysicalPosition::new(x, y));
     let _ = pop.show();
     let _ = pop.set_focus();
+}
+
+/// The account named by `--switch <who>` / `--switch=<who>`, if any.
+fn switch_arg(argv: &[String]) -> Option<String> {
+    argv.iter().enumerate().find_map(|(i, a)| {
+        a.strip_prefix("--switch=").map(str::to_string).or_else(|| {
+            (a == "--switch")
+                .then(|| argv.get(i + 1).cloned())
+                .flatten()
+        })
+    })
+}
+
+/// Switch accounts on behalf of the command line, as if clicked (so
+/// auto-switch treats it as the user's choice).
+async fn cli_switch(core: &engine::SharedCore, who: &str) {
+    let Some(id) = core.resolve_account(who) else {
+        core.notify(
+            "Clyde couldn't switch",
+            &format!("No account matches \"{who}\"."),
+        );
+        return;
+    };
+    match core.set_active_by_user(&id).await {
+        Ok(()) => tracing::info!("switched to {id} from the command line"),
+        Err(e) => {
+            tracing::warn!("command-line switch to {id} failed: {e:#}");
+            core.notify("Clyde couldn't switch", &format!("{e:#}"));
+        }
+    }
 }
 
 /// "Open Clyde" from the popover: bring up the full window, optionally on a

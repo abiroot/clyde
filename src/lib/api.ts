@@ -69,6 +69,8 @@ export const api = {
   setActiveAccount: (id: string) =>
     invoke<SwitchOutcome>("set_active_account", { id }),
 
+  connectKimi: (key: string) => invoke<AppSnapshot>("connect_kimi", { key }),
+
   renameAccount: (id: string, label: string) =>
     invoke<AppSnapshot>("rename_account", { id, label }),
 

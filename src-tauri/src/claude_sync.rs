@@ -513,7 +513,11 @@ fn cleanup_legacy_at(path: &Path, backup: &Path) -> Result<bool> {
         let is_clyde_proxy = env
             .get("ANTHROPIC_BASE_URL")
             .and_then(|v| v.as_str())
-            .is_some_and(|u| u.contains("127.0.0.1") || u.contains("localhost"));
+            .is_some_and(|u| {
+                (u.contains("127.0.0.1") || u.contains("localhost"))
+                    // Clyde's own Kimi relay is current, not a leftover.
+                    && !u.contains(crate::kimi_relay::PREFIX)
+            });
         if is_clyde_proxy {
             env.remove("ANTHROPIC_BASE_URL");
             changed = true;
@@ -534,6 +538,55 @@ fn cleanup_legacy_at(path: &Path, backup: &Path) -> Result<bool> {
 
 /// Claude Code's global config, parsed — for reading keys Clyde doesn't own
 /// (e.g. `mcpServers`). `None` when missing or unreadable.
+/// The `env` object of `~/.claude/settings.json` (empty when there is none).
+pub fn read_settings_env() -> Map<String, Value> {
+    settings_path()
+        .ok()
+        .and_then(|p| read_json_object(&p).ok())
+        .and_then(|mut root| match root.remove("env") {
+            Some(Value::Object(env)) => Some(env),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Set keys in `settings.json`'s `env`, preserving everything else in the file.
+/// Running `claude` sessions re-read it and apply the change within seconds.
+pub fn write_settings_env(pairs: &[(&str, String)]) -> Result<()> {
+    edit_settings_env(|env| {
+        for (k, v) in pairs {
+            env.insert((*k).to_string(), Value::String(v.clone()));
+        }
+        true
+    })
+    .map(|_| ())
+}
+
+/// Apply `edit` to `settings.json`'s `env`; write only when it reports a change.
+/// An unparsable file is left alone rather than replaced.
+pub fn edit_settings_env(edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<bool> {
+    let path = settings_path()?;
+    let mut root = read_json_object(&path)?;
+    let mut env = match root.remove("env") {
+        Some(Value::Object(env)) => env,
+        Some(other) => {
+            root.insert("env".into(), other);
+            return Err(anyhow!(
+                "settings.json has a non-object \"env\"; leaving it alone"
+            ));
+        }
+        None => Map::new(),
+    };
+    let changed = edit(&mut env);
+    if !env.is_empty() {
+        root.insert("env".into(), Value::Object(env));
+    }
+    if changed {
+        write_json_atomic(&path, &root)?;
+    }
+    Ok(changed)
+}
+
 pub fn read_global_config() -> Option<Value> {
     let text = std::fs::read_to_string(claude_json_path().ok()?).ok()?;
     serde_json::from_str(&text).ok()

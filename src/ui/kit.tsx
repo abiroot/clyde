@@ -21,7 +21,7 @@ export interface LimitRowData {
 export function limitRows(a: AccountView): LimitRowData[] {
   const u = a.usage;
   const fc = (label: string) => a.forecasts?.find((f) => f.label === label) ?? null;
-  return [
+  const rows: LimitRowData[] = [
     { label: "Session", percent: u.five_hour_utilization, resetsAt: u.five_hour_resets_at ?? null, forecast: fc("Session") },
     { label: "Week", percent: u.seven_day_utilization, resetsAt: u.seven_day_resets_at ?? null, forecast: fc("Week") },
     ...(u.scoped_limits ?? []).map((l) => ({
@@ -32,6 +32,8 @@ export function limitRows(a: AccountView): LimitRowData[] {
       forecast: fc(l.label),
     })),
   ];
+  // Kimi has a 5-hour window and a monthly cap, no weekly one.
+  return a.provider === "kimi" ? rows.filter((r) => r.percent != null) : rows;
 }
 
 export function LimitRow({ label, percent, resetsAt, severity, forecast, large = false }: LimitRowData & { large?: boolean }) {
