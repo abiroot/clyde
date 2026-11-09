@@ -421,9 +421,42 @@ pub const ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_DISABLE_1M_CONTEXT",
 ];
 
-/// Compact long conversations at this size at most, even on 1M-token models:
-/// every request resends the whole conversation, and Refuseless bills it.
-const COMPACT_CAP: u64 = 262_144;
+/// Where long conversations compact unless the user picks otherwise. Every
+/// request resends the whole conversation and Refuseless bills it, so the
+/// default stays well under a 1M model's window.
+pub const DEFAULT_COMPACT_AT: u64 = 262_144;
+
+/// The sizes a provider card offers. Claude Code reads
+/// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as 100K..=1,000,000 and warns above that,
+/// so "1M" is 1,000,000, not 1,048,576 (2.1.321).
+pub const COMPACT_CHOICES: [u64; 3] = [262_144, 524_288, 1_000_000];
+
+/// `tokens` if it is one of [`COMPACT_CHOICES`], else the default.
+pub fn compact_choice(tokens: Option<u64>) -> u64 {
+    tokens
+        .filter(|t| COMPACT_CHOICES.contains(t))
+        .unwrap_or(DEFAULT_COMPACT_AT)
+}
+
+/// "256K" / "512K" / "1M".
+pub fn size_label(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}M", (tokens as f64 / 1_000_000.0).round() as u64)
+    } else {
+        format!("{}K", tokens / 1024)
+    }
+}
+
+/// "Refuseless · 1M context · compacts at 256K": the window, and where
+/// sessions actually compact when that's earlier.
+fn model_description(provider: Provider, context: u64, compact_at: u64) -> String {
+    let base = format!("{} · {}", provider.label(), context_label(context));
+    if compact_at < context.min(1_000_000) {
+        format!("{base} · compacts at {}", size_label(compact_at))
+    } else {
+        base
+    }
+}
 
 /// Where and how Claude Code reaches a provider.
 pub struct Route<'a> {
@@ -436,11 +469,12 @@ pub struct Route<'a> {
     pub model: &'a ModelInfo,
     /// Everything the provider serves (for capabilities and context).
     pub catalog: &'a [ModelInfo],
+    /// Where sessions compact (capped at the smallest window served).
+    pub compact_at: u64,
 }
 
 /// The `env` entries that make Claude Code use a provider.
 pub fn env_on(r: &Route) -> Vec<(&'static str, String)> {
-    let label = r.provider.label();
     let smallest = r
         .catalog
         .iter()
@@ -458,16 +492,21 @@ pub fn env_on(r: &Route) -> Vec<(&'static str, String)> {
                 // Unknown model ids get Claude Code's 200K guess, or 1M when it
                 // assumes the default model is a 1M one; give it the real window.
                 "CLAUDE_CODE_MAX_CONTEXT_TOKENS" => smallest.to_string(),
-                "CLAUDE_CODE_AUTO_COMPACT_WINDOW" => smallest.min(COMPACT_CAP).to_string(),
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW" => {
+                    smallest.min(r.compact_at).min(1_000_000).to_string()
+                }
                 "CLAUDE_CODE_DISABLE_1M_CONTEXT" => "1".into(),
                 "CLAUDE_CODE_MODEL_CAPABILITIES" => capabilities(r.catalog),
                 // Its per-request fields sit at the very top of the system
                 // prompt, which costs prefix-cached providers the whole cache.
                 "CLAUDE_CODE_ATTRIBUTION_HEADER" => "0".into(),
                 k if k.ends_with("_MODEL_NAME") => r.model.name.clone(),
-                k if k.ends_with("_MODEL_DESCRIPTION") => {
-                    format!("{label} · {}", context_label(r.model.context))
-                }
+                // Claude's own /model rows (opus, sonnet, …) all point at this
+                // model; say they're the default the rows below override.
+                k if k.ends_with("_MODEL_DESCRIPTION") => format!(
+                    "Default · {}",
+                    model_description(r.provider, r.model.context, smallest.min(r.compact_at))
+                ),
                 k if FAMILIES
                     .iter()
                     .any(|f| k == format!("ANTHROPIC_DEFAULT_{f}_MODEL")) =>
@@ -521,14 +560,19 @@ pub fn env_off() -> Vec<(&'static str, String)> {
 
 /// The `/model` picker lineup while a provider is active: its models under
 /// their own names, instead of Claude's.
-pub fn model_picker(provider: Provider, catalog: &[ModelInfo]) -> Value {
+pub fn model_picker(provider: Provider, catalog: &[ModelInfo], compact_at: u64) -> Value {
+    let smallest = catalog
+        .iter()
+        .map(|m| m.context)
+        .min()
+        .unwrap_or(compact_at);
     let options: Vec<Value> = catalog
         .iter()
         .map(|m| {
             json!({
                 "model": m.id,
                 "label": m.name,
-                "description": format!("{} · {}", provider.label(), context_label(m.context)),
+                "description": model_description(provider, m.context, smallest.min(compact_at)),
             })
         })
         .collect();
@@ -768,6 +812,7 @@ mod tests {
             token: crate::relay::PLACEHOLDER_TOKEN.into(),
             model: &catalog[0],
             catalog: &catalog,
+            compact_at: DEFAULT_COMPACT_AT,
         }));
         assert_eq!(routed_provider(&on), Some(Provider::Kimi));
         assert!(crate::relay::provider_of(on["ANTHROPIC_BASE_URL"].as_str().unwrap()).is_some());
@@ -795,10 +840,15 @@ mod tests {
             token: "abl_x".into(),
             model: &catalog[1],
             catalog: &catalog[1..],
+            compact_at: DEFAULT_COMPACT_AT,
         }));
         assert_eq!(routed_provider(&direct), Some(Provider::Refuseless));
         assert_eq!(direct["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], json!("262144"));
         assert_eq!(direct["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], json!("1048576"));
+        assert_eq!(
+            direct["ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION"],
+            json!("Default · Refuseless · 1M context · compacts at 256K")
+        );
 
         let mut off = env_map(env_off());
         assert_eq!(routed_provider(&off), None);
@@ -845,6 +895,70 @@ mod tests {
         assert!(Provider::Refuseless
             .normalize_key("sk-kimi-0123456789abcdef")
             .is_err());
+    }
+
+    #[test]
+    fn the_compact_size_follows_the_users_choice() {
+        let one_m = ModelInfo {
+            id: "deepseek-v4.1-flash-abliterated".into(),
+            name: "DeepSeek V4.1 Flash Abliterated".into(),
+            context: 1_048_576,
+            efforts: vec![],
+            thinking_only: false,
+        };
+        let small = ModelInfo {
+            id: "k3".into(),
+            name: "K3".into(),
+            context: 262_144,
+            efforts: vec![],
+            thinking_only: true,
+        };
+        let env = |catalog: &[ModelInfo], compact_at| {
+            env_map(env_on(&Route {
+                provider: Provider::Refuseless,
+                base_url: Provider::Refuseless.upstream(),
+                token: "abl_x".into(),
+                model: &catalog[0],
+                catalog,
+                compact_at,
+            }))
+        };
+        let full = std::slice::from_ref(&one_m);
+
+        let half = env(full, 524_288);
+        assert_eq!(half["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], json!("524288"));
+        assert_eq!(
+            half["ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION"],
+            json!("Default · Refuseless · 1M context · compacts at 512K")
+        );
+
+        // Claude Code's ceiling for the variable is 1,000,000.
+        let max = env(full, 1_000_000);
+        assert_eq!(max["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], json!("1000000"));
+        assert_eq!(
+            max["ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION"],
+            json!("Default · Refuseless · 1M context"),
+            "no 'compacts at' note when it compacts at the window"
+        );
+
+        // Never past the smallest window the provider serves.
+        let mixed = [one_m.clone(), small];
+        assert_eq!(
+            env(&mixed, 1_000_000)["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+            json!("262144")
+        );
+
+        let picker = model_picker(Provider::Refuseless, full, DEFAULT_COMPACT_AT);
+        assert_eq!(
+            picker["options"][0]["description"],
+            json!("Refuseless · 1M context · compacts at 256K")
+        );
+
+        assert_eq!(compact_choice(None), DEFAULT_COMPACT_AT);
+        assert_eq!(compact_choice(Some(123)), DEFAULT_COMPACT_AT);
+        assert_eq!(compact_choice(Some(1_000_000)), 1_000_000);
+        assert_eq!(size_label(262_144), "256K");
+        assert_eq!(size_label(1_000_000), "1M");
     }
 
     #[test]

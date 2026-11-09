@@ -121,6 +121,8 @@ pub struct AccountView {
     pub models: Vec<crate::provider::ModelInfo>,
     /// The model Clyde points Claude Code's aliases at, for a provider.
     pub model: Option<String>,
+    /// Where a provider's sessions compact, in tokens.
+    pub compact_at: Option<u64>,
     pub usage: UsageSnapshot,
     /// Whether this account is the one currently selected to serve traffic.
     pub is_active: bool,

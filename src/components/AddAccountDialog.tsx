@@ -21,66 +21,115 @@ interface Props {
   onClose: () => void;
 }
 
-type Tab = "claude" | "browser" | "new" | "token" | "providers";
+type Tab = "claude" | "browser" | "new" | "token" | "kimi" | "refuseless";
+
+/** The ways to add an account, grouped: Claude logins first, then the other
+ *  model providers. A side menu keeps every option's full name visible
+ *  (a row of tabs ran out of room at five). */
+const SECTIONS: { title: string; items: { id: Tab; label: string; hint: string; icon: ReactNode }[] }[] = [
+  {
+    title: "Claude account",
+    items: [
+      { id: "claude", label: "Detected", hint: "Already signed in", icon: <Download size={14} /> },
+      { id: "browser", label: "Browser", hint: "Sign in on claude.ai", icon: <Globe size={14} /> },
+      { id: "new", label: "Terminal", hint: "claude /login", icon: <UserPlus size={14} /> },
+      { id: "token", label: "Token", hint: "Paste credentials", icon: <ClipboardPaste size={14} /> },
+    ],
+  },
+  {
+    title: "Other models",
+    items: [
+      { id: "kimi", label: "Kimi", hint: "Kimi Code plan", icon: <KeyRound size={14} /> },
+      { id: "refuseless", label: "Refuseless", hint: "Pay per token", icon: <KeyRound size={14} /> },
+    ],
+  },
+];
 
 export function AddAccountDialog({ onDone, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("claude");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const pick = (t: Tab) => {
+    if (busy || t === tab) return;
+    setTab(t);
+    setError(null);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center">
-      <div className="card no-drag fade-in m-3 w-full max-w-[420px] overflow-hidden">
-        <div className="flex items-center justify-between border-b border-[var(--color-border-soft)] px-4 py-3">
-          <span className="text-sm font-semibold">Add an account</span>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="add-account-title"
+        className="card no-drag fade-in m-3 flex max-h-[calc(100vh-24px)] w-full max-w-[600px] flex-col overflow-hidden"
+      >
+        <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border-soft)] px-4 py-3">
+          <span id="add-account-title" className="text-sm font-semibold">
+            Add an account
+          </span>
           <button
             onClick={onClose}
+            aria-label="Close"
             className="rounded-lg p-1 text-[var(--color-ink-faint)] hover:bg-white/5"
           >
             <X size={16} />
           </button>
         </div>
 
-        <div className="flex gap-1 px-4 pt-3">
-          <TabButton active={tab === "claude"} onClick={() => setTab("claude")}>
-            <Download size={14} /> Detected
-          </TabButton>
-          <TabButton active={tab === "browser"} onClick={() => setTab("browser")}>
-            <Globe size={14} /> Browser
-          </TabButton>
-          <TabButton active={tab === "new"} onClick={() => setTab("new")}>
-            <UserPlus size={14} /> Terminal
-          </TabButton>
-          <TabButton active={tab === "token"} onClick={() => setTab("token")}>
-            <ClipboardPaste size={14} /> Token
-          </TabButton>
-          <TabButton active={tab === "providers"} onClick={() => setTab("providers")}>
-            <KeyRound size={14} /> Kimi…
-          </TabButton>
-        </div>
+        <div className="flex min-h-0 flex-1">
+          <nav
+            aria-label="Ways to add an account"
+            className="flex w-[172px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-[var(--color-border-soft)] p-2"
+          >
+            {SECTIONS.map((s) => (
+              <div key={s.title} className="flex flex-col gap-0.5">
+                <span className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-ink-faint)]">
+                  {s.title}
+                </span>
+                {s.items.map((it) => (
+                  <NavItem key={it.id} active={tab === it.id} disabled={busy} onClick={() => pick(it.id)} icon={it.icon} label={it.label} hint={it.hint} />
+                ))}
+              </div>
+            ))}
+          </nav>
 
-        <div className="flex flex-col gap-3 p-4">
-          {tab === "claude" && (
-            <ImportTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
-          )}
-          {tab === "browser" && (
-            <BrowserTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
-          )}
-          {tab === "new" && (
-            <NewAccountTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
-          )}
-          {tab === "token" && (
-            <TokenTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
-          )}
-          {tab === "providers" && (
-            <ProvidersTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
-          )}
+          <div className="flex min-h-[300px] min-w-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+            {tab === "claude" && (
+              <ImportTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+            )}
+            {tab === "browser" && (
+              <BrowserTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+            )}
+            {tab === "new" && (
+              <NewAccountTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+            )}
+            {tab === "token" && (
+              <TokenTab busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+            )}
+            {(tab === "kimi" || tab === "refuseless") && (
+              <ProvidersTab key={tab} provider={tab} busy={busy} setBusy={setBusy} setError={setError} onDone={onDone} />
+            )}
 
-          {error && (
-            <p className="rounded-lg bg-[var(--color-danger)]/10 px-3 py-2 text-xs text-[var(--color-danger)]">
-              {error}
-            </p>
-          )}
+            {error && (
+              <p className="rounded-lg bg-[var(--color-danger)]/10 px-3 py-2 text-xs text-[var(--color-danger)]">
+                {error}
+              </p>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -498,8 +547,13 @@ const PROVIDERS = {
 
 /** Model providers: no sign-in to borrow, just a key from the provider's
  *  console. The key is checked with the provider, then kept in the Keychain. */
-function ProvidersTab({ busy, setBusy, setError, onDone }: TabProps) {
-  const [provider, setProvider] = useState<keyof typeof PROVIDERS>("kimi");
+function ProvidersTab({
+  provider,
+  busy,
+  setBusy,
+  setError,
+  onDone,
+}: TabProps & { provider: keyof typeof PROVIDERS }) {
   const [key, setKey] = useState("");
   const p = PROVIDERS[provider];
 
@@ -517,22 +571,6 @@ function ProvidersTab({ busy, setBusy, setError, onDone }: TabProps) {
 
   return (
     <>
-      <div className="n-segmented" role="tablist">
-        {(Object.keys(PROVIDERS) as (keyof typeof PROVIDERS)[]).map((id) => (
-          <button
-            key={id}
-            role="tab"
-            aria-selected={provider === id}
-            onClick={() => {
-              setProvider(id);
-              setKey("");
-              setError(null);
-            }}
-          >
-            {PROVIDERS[id].name}
-          </button>
-        ))}
-      </div>
       <p className="text-xs leading-relaxed text-[var(--color-ink-soft)]">
         {p.about} Switching keeps your skills, MCP servers and memory; it only changes the model behind Claude Code.
       </p>
@@ -564,25 +602,37 @@ function ProvidersTab({ busy, setBusy, setError, onDone }: TabProps) {
   );
 }
 
-function TabButton({
+function NavItem({
   active,
+  disabled,
   onClick,
-  children,
+  icon,
+  label,
+  hint,
 }: {
   active: boolean;
+  disabled: boolean;
   onClick: () => void;
-  children: ReactNode;
+  icon: ReactNode;
+  label: string;
+  hint: string;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
+      disabled={disabled && !active}
+      aria-current={active ? "page" : undefined}
+      className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors disabled:opacity-40 ${
         active
           ? "bg-[var(--color-surface-2)] text-[var(--color-ink)]"
-          : "text-[var(--color-ink-faint)] hover:text-[var(--color-ink-soft)]"
+          : "text-[var(--color-ink-soft)] hover:bg-white/5 hover:text-[var(--color-ink)]"
       }`}
     >
-      {children}
+      <span className="mt-[1px] shrink-0 opacity-80">{icon}</span>
+      <span className="flex min-w-0 flex-col">
+        <span className="text-xs font-medium">{label}</span>
+        <span className="truncate text-[11px] text-[var(--color-ink-faint)]">{hint}</span>
+      </span>
     </button>
   );
 }

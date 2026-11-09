@@ -301,6 +301,10 @@ function AccountHeader({
   );
 }
 
+/** Where a provider's sessions can compact, in tokens (mirrors
+ *  `provider::COMPACT_CHOICES`; Claude Code's ceiling is 1,000,000). */
+const COMPACT_CHOICES = [262_144, 524_288, 1_000_000];
+
 /** A provider's model: which one Claude Code's sessions on it use. Sessions
  *  follow within seconds; `/model` in a session picks one for that session. */
 function ModelSelect({ account, setSnapshot }: { account: AccountView; setSnapshot: (s: AppSnapshot) => void }) {
@@ -308,17 +312,23 @@ function ModelSelect({ account, setSnapshot }: { account: AccountView; setSnapsh
   const [error, setError] = useState<string | null>(null);
   if (account.provider === "claude" || account.models.length === 0) return null;
 
-  const pick = async (model: string) => {
+  const run = async (call: () => Promise<AppSnapshot>) => {
     setBusy(true);
     setError(null);
     try {
-      setSnapshot(await api.setProviderModel(account.provider, model));
+      setSnapshot(await call());
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
   };
+  const pick = (model: string) => run(() => api.setProviderModel(account.provider, model));
+  const compact = (tokens: number) => run(() => api.setProviderCompact(account.provider, tokens));
+
+  // Never past the smallest window the provider serves (Clyde caps it there too).
+  const smallest = Math.min(...account.models.map((m) => m.context));
+  const compactChoices = COMPACT_CHOICES.filter((c) => c === COMPACT_CHOICES[0] || c <= smallest);
 
   return (
     <div className="flex flex-col gap-1">
@@ -338,6 +348,25 @@ function ModelSelect({ account, setSnapshot }: { account: AccountView; setSnapsh
           ))}
         </select>
       </label>
+      {compactChoices.length > 1 && (
+        <label className="flex items-center gap-2 text-[12px]" title="Long sessions summarise themselves at this size. Every request resends the whole conversation, so a bigger size costs more per turn.">
+          <span className="n-dim w-12 shrink-0">Compact</span>
+          <select
+            aria-label={`${account.label} compact size`}
+            value={account.compact_at ?? COMPACT_CHOICES[0]}
+            disabled={busy}
+            onChange={(e) => compact(Number(e.target.value))}
+            className="min-w-0 flex-1 rounded-md border border-[var(--n-card-border)] bg-[var(--n-window)] px-2 py-0.5 text-[13px]"
+          >
+            {compactChoices.map((c) => (
+              <option key={c} value={c}>
+                at {c >= 1_000_000 ? "1M" : `${c / 1024}K`}
+                {c === COMPACT_CHOICES[0] ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {error && (
         <p className="text-[11px]" style={{ color: "var(--n-danger)" }}>
           {error}

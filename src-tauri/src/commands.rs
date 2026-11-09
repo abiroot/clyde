@@ -257,6 +257,19 @@ pub fn set_provider_model(
     Ok(core.snapshot())
 }
 
+/// Choose where a provider's sessions compact (tokens).
+#[tauri::command]
+pub fn set_provider_compact(
+    core: State<SharedCore>,
+    provider: String,
+    tokens: u64,
+) -> CmdResult<AppSnapshot> {
+    let p = Provider::from_id(&provider).ok_or_else(|| format!("unknown provider {provider}"))?;
+    core.set_provider_compact(p, tokens)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(core.snapshot())
+}
+
 /// Per-folder pins and the launch commands, for the Sessions page.
 #[derive(Serialize)]
 pub struct RoutingView {

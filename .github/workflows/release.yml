@@ -29,6 +29,18 @@ jobs:
 
       - run: npm ci
 
+      # release-notes/<tag>.md becomes the release's body and the "notes" in
+      # latest.json, which installed copies show under "What's new".
+      - name: Release notes
+        id: notes
+        run: |
+          f="release-notes/${GITHUB_REF_NAME}.md"
+          {
+            echo 'body<<CLYDE_NOTES_EOF'
+            if [ -f "$f" ]; then cat "$f"; fi
+            echo 'CLYDE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & publish
         uses: tauri-apps/tauri-action@v0
         env:
@@ -42,6 +54,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Clyde ${{ github.ref_name }}"
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           # Publishes latest.json, which installed copies poll for updates.

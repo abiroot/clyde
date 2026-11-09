@@ -83,8 +83,8 @@ token from Chrome and registers the server with Claude Code. See
 **Kimi Code and Refuseless (optional).** Connect a Kimi Code membership or a
 Refuseless account and it appears as one more account: one click (or
 auto-switch) moves Claude Code onto it — running sessions included, within
-seconds — and back. Pick the model in Clyde or with `/model` in a session; your
-skills, MCP servers and memory stay. Individual folders and sessions can be
+seconds — and back. Pick the default model in Clyde, or a different one per
+session with `/model`; your skills, MCP servers and memory stay. Individual folders and sessions can be
 pinned to a provider while the rest stay on Claude. See
 [Model providers](#model-providers-kimi-code-refuseless).
 
@@ -162,12 +162,18 @@ token from a prepaid balance). The provider then has a card with its limits (Kim
 provider's live model list, and a **Use** button. Kimi joins the auto-switch
 priority list last; Refuseless starts excluded, since it costs money per token.
 
-- **Choosing the model.** The card's **Model** menu sets the model every
-  session on that provider uses; sessions follow within seconds. Inside a
-  session, `/model` lists the provider's models under their own names
-  (`/model k3`, or pick one) and `/effort` works; a pick saved as the default
-  becomes the provider's model in Clyde too. `clyde --switch kimi:k3` does both
-  from a terminal.
+- **Choosing the model.** The card's **Model** menu sets the provider's
+  default model; sessions that haven't picked their own follow within seconds.
+  Inside a session, `/model` lists the provider's models under their own names
+  (`/model k3`, or pick one) — also in a folder pinned to the provider — and
+  `/effort` works. A `/model` pick belongs to that session only, so two
+  sessions in the same folder can run different models. `clyde --switch kimi:k3`
+  sets the default from a terminal.
+- **When long sessions compact.** The card's **Compact** menu sets the size at
+  which sessions on that provider summarise themselves: 256K (the default),
+  512K or 1M tokens. Every request resends the whole conversation, so a bigger
+  size costs more per turn on a pay-per-token provider. `/model` shows it next
+  to each model's window.
 - **Per folder and per session.** The **Sessions** page lists running sessions;
   pin a folder to Claude, Kimi or Refuseless and every session there follows
   within seconds, whatever the global choice and whatever auto-switch does

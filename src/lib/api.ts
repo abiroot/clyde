@@ -77,6 +77,9 @@ export const api = {
   setProviderModel: (provider: string, model: string) =>
     invoke<AppSnapshot>("set_provider_model", { provider, model }),
 
+  setProviderCompact: (provider: string, tokens: number) =>
+    invoke<AppSnapshot>("set_provider_compact", { provider, tokens }),
+
   getRouting: () => invoke<RoutingView>("get_routing"),
 
   setFolderPin: (folder: string, target: Target | null) =>

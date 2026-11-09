@@ -32,6 +32,8 @@ export interface AccountView {
   models: ModelInfo[];
   /** The model the provider's sessions use. */
   model: string | null;
+  /** Where the provider's sessions compact, in tokens. */
+  compact_at: number | null;
   usage: UsageSnapshot;
   is_active: boolean;
   /** Why the last usage read failed, when it did. */

@@ -231,14 +231,26 @@ back to the default instead of a 404).
 Capabilities: Claude Code can't size or configure model ids it doesn't know, so
 the env also carries `CLAUDE_CODE_MODEL_CAPABILITIES` (effort, max effort,
 thinking per model; `mid_conv_tool_change` off), `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
-(the smallest window the provider offers), an auto-compact window capped at 256K,
+(the smallest window the provider offers), an auto-compact window
+(`CLAUDE_CODE_AUTO_COMPACT_WINDOW`: the card's Compact choice, 256K by default,
+never above that window or Claude Code's 1,000,000 ceiling),
 `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` (it otherwise assumes the default model is a
 1M one) and `CLAUDE_CODE_ATTRIBUTION_HEADER=0`.
 
 `/model` writes its pick into the user's `model` setting. `Core::watch_model_setting`
-(every 3 s, on mtime change) takes a provider's model id from there as that
-provider's chosen model and restores the user's own value, so new Claude
-sessions never start on a name Anthropic doesn't know.
+(every 3 s, on mtime change) restores the user's own value, so new Claude
+sessions never start on a name Anthropic doesn't know. The pick stays with the
+session that made it — Claude Code holds it in the session and other running
+sessions don't follow `model` changes (verified on 2.1.321) — so sessions in
+one folder can run different models. Until 1.4 the watcher also made the pick
+the provider's model, which moved every session on it.
+
+`modelPicker` is only read from user, `--settings` and managed settings, never
+from a folder. While Claude is the global choice and folders are pinned to a
+provider, `Core::sync_pin_picker` puts the providers' models in the user's
+picker after Claude's lineup (`replaceBuiltInOptions: false`); the user's
+`availableModels` guard hides them everywhere except the pinned folders, whose
+own allowlist adds them back (Claude Code joins the lists).
 
 Pins: a folder's `.claude/settings.local.json` env outranks the user's and
 applies live; flag settings (`--settings`) outrank it too and combine with a

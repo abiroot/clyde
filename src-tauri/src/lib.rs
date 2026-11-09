@@ -110,6 +110,7 @@ pub fn run() {
             commands::set_active_account,
             commands::connect_provider,
             commands::set_provider_model,
+            commands::set_provider_compact,
             commands::get_routing,
             commands::set_folder_pin,
             commands::install_commands,

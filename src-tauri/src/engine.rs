@@ -218,6 +218,7 @@ impl Core {
                 provider: "claude".into(),
                 models: Vec::new(),
                 model: None,
+                compact_at: None,
                 usage: s.usage.get(&a.id).cloned().unwrap_or_default(),
                 is_active: Some(&a.id) == active_id.as_ref(),
                 usage_error: s.usage_errors.get(&a.id).cloned(),
@@ -247,6 +248,7 @@ impl Core {
                 provider: p.id().into(),
                 models: catalog,
                 model: Some(model),
+                compact_at: Some(self.compact_at(p)),
                 usage: s.usage.get(p.id()).cloned().unwrap_or_default(),
                 is_active: active_id.as_deref() == Some(p.id()),
                 usage_error: s.usage_errors.get(p.id()).cloned(),
@@ -598,7 +600,13 @@ impl Core {
             key: key.as_deref(),
             catalog: &catalog,
             model: &model,
+            compact_at: self.compact_at(p),
         })
+    }
+
+    /// Where `p`'s sessions compact, in tokens.
+    pub fn compact_at(&self, p: Provider) -> u64 {
+        crate::provider::compact_choice(self.routing.read().unwrap().compact_at.get(&p).copied())
     }
 
     fn relay_up(&self) -> bool {
@@ -626,7 +634,40 @@ impl Core {
         routing::leave_provider(&mut prefs, |m| self.is_provider_model(m))?;
         *self.routing.write().unwrap() = prefs;
         self.save_routing();
+        self.sync_pin_picker();
         Ok(())
+    }
+
+    /// While Claude is the global choice, list the models of every provider
+    /// a folder is pinned to in `/model` (see [`routing::sync_pin_picker`]).
+    fn sync_pin_picker(&self) {
+        if routing::global_provider().is_some() {
+            return; // the provider's own picker is in place
+        }
+        let pinned: std::collections::BTreeSet<Provider> = self
+            .routing
+            .read()
+            .unwrap()
+            .folder_pins
+            .values()
+            .filter_map(|t| t.provider())
+            .filter(|p| self.provider_key(*p).is_some())
+            .collect();
+        let options: Vec<serde_json::Value> = pinned
+            .into_iter()
+            .flat_map(|p| {
+                let picker = crate::provider::model_picker(p, &self.catalog(p), self.compact_at(p));
+                picker["options"].as_array().cloned().unwrap_or_default()
+            })
+            .collect();
+        let mut prefs = self.routing.read().unwrap().clone();
+        match routing::sync_pin_picker(&mut prefs, options) {
+            Ok(()) => {
+                *self.routing.write().unwrap() = prefs;
+                self.save_routing();
+            }
+            Err(e) => tracing::warn!("couldn't update the /model picker for pinned folders: {e:#}"),
+        }
     }
 
     /// Rewrite every place that routes to a provider — the global choice,
@@ -666,6 +707,7 @@ impl Core {
                 tracing::warn!("couldn't write the {} launch file: {e:#}", t.id());
             }
         }
+        self.sync_pin_picker();
     }
 
     /// Point `p`'s aliases at `model` — in the global route, pinned folders and
@@ -679,6 +721,20 @@ impl Core {
             .unwrap()
             .models
             .insert(p, model.to_string());
+        self.save_routing();
+        self.refresh_routes();
+        self.emit();
+        Ok(())
+    }
+
+    /// Compact `p`'s sessions at `tokens` (one of the offered sizes) — in the
+    /// global route, pinned folders and launch files. Running sessions pick it
+    /// up from the global route and folder pins within seconds.
+    pub fn set_provider_compact(&self, p: Provider, tokens: u64) -> Result<()> {
+        if !crate::provider::COMPACT_CHOICES.contains(&tokens) {
+            anyhow::bail!("{tokens} isn't one of the offered compact sizes");
+        }
+        self.routing.write().unwrap().compact_at.insert(p, tokens);
         self.save_routing();
         self.refresh_routes();
         self.emit();
@@ -797,6 +853,7 @@ impl Core {
             }
         }
         self.save_routing();
+        self.sync_pin_picker();
         Ok(())
     }
 
@@ -804,10 +861,12 @@ impl Core {
         self.routing.read().unwrap().folder_pins.clone()
     }
 
-    /// `/model` picked a provider's model and saved it as the default: adopt
-    /// it as that provider's chosen model when it's the global one, and put
-    /// the user's own `model` setting back either way. Runs every few seconds,
-    /// but only reads `settings.json` when it changed.
+    /// `/model` picked a provider's model and saved it as the default: put the
+    /// user's own `model` setting back, so new Claude sessions don't start on
+    /// a name Anthropic doesn't know. The pick stays with the session that
+    /// made it; other sessions — in the same folder too — keep theirs (until
+    /// 1.3 Clyde made it the provider's model for every session). Runs every
+    /// few seconds, but only reads `settings.json` when it changed.
     pub fn watch_model_setting(&self) {
         let Ok(path) = claude_sync::settings_path() else {
             return;
@@ -833,16 +892,10 @@ impl Core {
             *self.routing.write().unwrap() = prefs;
             self.save_routing();
         }
-        let Some(picked) = picked else { return };
-        let bare = picked.trim_end_matches("[1m]").to_string();
-        match routing::global_provider() {
-            Some(p) if self.catalog(p).iter().any(|m| m.id == bare) => {
-                tracing::info!("/model picked {bare}: {}'s chosen model now", p.label());
-                if let Err(e) = self.set_provider_model(p, &bare) {
-                    tracing::warn!("couldn't adopt {bare}: {e:#}");
-                }
-            }
-            _ => tracing::info!("put the model setting back after /model saved {picked}"),
+        if let Some(picked) = picked {
+            tracing::info!(
+                "put the model setting back after /model saved {picked} (that session keeps it)"
+            );
         }
     }
 

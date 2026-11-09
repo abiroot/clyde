@@ -8,7 +8,8 @@
 //!   outranks the user's and applies live to every session running in that
 //!   folder (verified on Claude Code 2.1.312). A folder pinned to Claude gets
 //!   the keys blanked, which keeps it on Anthropic while the global choice is a
-//!   provider.
+//!   provider. `modelPicker` is NOT read from there, so the provider's models
+//!   reach `/model` through the user's picker ([`sync_pin_picker`]).
 //! - **Launch pins.** `claude --settings ~/.claude/clyde/<target>.json` (or the
 //!   `claude-<target>` commands) starts one session on a target whatever the
 //!   global choice — flag settings outrank the user's too, and combine with a
@@ -18,10 +19,14 @@
 //!
 //! `/model` saves its pick as the user's `model` setting. A provider's model
 //! id there would start every new Claude session on a name Anthropic doesn't
-//! know, so Clyde takes such a pick as the provider's chosen model and puts the
-//! user's own value back. A *running* session keeps a model it picked by id
-//! across a switch back to Claude; an `availableModels` list of Claude's
-//! families moves it to the default instead of an error (verified live).
+//! know, so Clyde puts the user's own value back. The pick stays with the
+//! session that made it: other sessions, even in the same folder, keep their
+//! model (verified on 2.1.321 — Claude Code holds the pick in the session and
+//! doesn't follow later changes to `model`). The provider's default model —
+//! what `opus`/`sonnet`/… point at — changes only from Clyde. A *running*
+//! session keeps a model it picked by id across a switch back to Claude; an
+//! `availableModels` list of Claude's families moves it to the default
+//! instead of an error (verified live).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,6 +102,8 @@ pub struct Prefs {
     pub saved_picker: Option<Value>,
     /// Folder (absolute path) → where its sessions go.
     pub folder_pins: BTreeMap<String, Target>,
+    /// Where each provider's sessions compact, in tokens (unset: the default).
+    pub compact_at: BTreeMap<Provider, u64>,
 }
 
 impl Prefs {
@@ -123,6 +130,8 @@ pub struct ProviderRoute<'a> {
     pub key: Option<&'a str>,
     pub catalog: &'a [ModelInfo],
     pub model: &'a ModelInfo,
+    /// Where sessions compact, in tokens.
+    pub compact_at: u64,
 }
 
 impl ProviderRoute<'_> {
@@ -146,6 +155,7 @@ impl ProviderRoute<'_> {
             token,
             model: self.model,
             catalog: self.catalog,
+            compact_at: self.compact_at,
         }))
     }
 
@@ -208,7 +218,7 @@ fn enter_provider_at(
         }
         root.insert(
             "modelPicker".into(),
-            provider::model_picker(route.provider, route.catalog),
+            provider::model_picker(route.provider, route.catalog, route.compact_at),
         );
         if prefs.guard.is_some() && root.get("availableModels") == prefs.guard.as_ref() {
             root.remove("availableModels");
@@ -258,10 +268,52 @@ fn leave_provider_at(
     Ok(())
 }
 
+/// While Claude is the global choice but folders are pinned to providers:
+/// put the providers' models in `/model` (live). `modelPicker` isn't read
+/// from a folder's settings, so this goes in the user's; the rows come after
+/// Claude's own lineup, and the `availableModels` guard hides them outside
+/// the pinned folders (whose own allowlist adds them back — Claude Code
+/// joins the lists). Empty `options`: no pins, take the rows away again.
+pub fn sync_pin_picker(prefs: &mut Prefs, options: Vec<Value>) -> Result<()> {
+    sync_pin_picker_at(&claude_sync::settings_path()?, prefs, options)
+}
+
+fn sync_pin_picker_at(path: &Path, prefs: &mut Prefs, options: Vec<Value>) -> Result<()> {
+    claude_sync::edit_settings_file(path, |root| {
+        let before = root.clone();
+        if options.is_empty() {
+            if prefs.picker_set {
+                match prefs.saved_picker.take() {
+                    Some(p) => root.insert("modelPicker".into(), p),
+                    None => root.remove("modelPicker"),
+                };
+                prefs.picker_set = false;
+            }
+        } else {
+            if !prefs.picker_set {
+                prefs.saved_picker = root.get("modelPicker").cloned();
+                prefs.picker_set = true;
+            }
+            root.insert(
+                "modelPicker".into(),
+                json!({ "options": options, "replaceBuiltInOptions": false }),
+            );
+            if !root.contains_key("availableModels") {
+                let guard = json!(CLAUDE_FAMILIES);
+                root.insert("availableModels".into(), guard.clone());
+                prefs.guard = Some(guard);
+            }
+        }
+        Ok(*root != before)
+    })?;
+    Ok(())
+}
+
 /// After `/model` saved a pick: a provider's model id in the user's `model`
 /// setting goes back to the user's own value, and is returned so the caller
 /// can adopt it when that provider is the active one. A Claude value is
-/// remembered as the one to restore.
+/// remembered as the one to restore. The session that picked keeps its model
+/// (Claude Code holds it in the session); nothing else follows it.
 pub fn reconcile_model_setting(
     prefs: &mut Prefs,
     is_provider_model: impl Fn(&str) -> bool,
@@ -408,7 +460,7 @@ pub fn launch_settings(
                 .collect();
             Some(json!({
                 "env": env,
-                "modelPicker": provider::model_picker(r.provider, r.catalog),
+                "modelPicker": provider::model_picker(r.provider, r.catalog, r.compact_at),
                 "availableModels": r.allowed_models(),
             }))
         }
@@ -532,6 +584,7 @@ mod tests {
             key: Some("sk-kimi-x"),
             catalog: &catalog,
             model: &catalog[0],
+            compact_at: provider::DEFAULT_COMPACT_AT,
         };
         let s = launch_settings(Target::Kimi, Some(&route), true).unwrap();
         assert_eq!(s["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "k3.1-pro");
@@ -587,6 +640,7 @@ mod tests {
             key: Some("sk-kimi-x"),
             catalog: &catalog,
             model: &catalog[0],
+            compact_at: provider::DEFAULT_COMPACT_AT,
         };
         let is_provider = |m: &str| m == "k3.1-pro";
         let mut prefs = Prefs::default();
@@ -638,5 +692,55 @@ mod tests {
             json!("refuseless")
         );
         assert!(command_script(Target::Kimi).contains(".claude/clyde/kimi.json"));
+    }
+
+    #[test]
+    fn pinned_folders_get_the_providers_models_in_model_and_lose_them_after() {
+        let dir = std::env::temp_dir().join(format!("clyde-pin-picker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mine = json!({"options": [{"model": "opus", "label": "Mine"}]});
+        std::fs::write(
+            &path,
+            json!({"model": "opus", "modelPicker": mine}).to_string(),
+        )
+        .unwrap();
+        let read =
+            || -> Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap() };
+        let mut prefs = Prefs::default();
+        let rows = provider::model_picker(
+            Provider::Kimi,
+            &kimi_catalog(),
+            provider::DEFAULT_COMPACT_AT,
+        )["options"]
+            .as_array()
+            .unwrap()
+            .clone();
+
+        sync_pin_picker_at(&path, &mut prefs, rows).unwrap();
+        let on = read();
+        assert_eq!(
+            on["modelPicker"]["replaceBuiltInOptions"],
+            json!(false),
+            "after Claude's lineup"
+        );
+        assert_eq!(on["modelPicker"]["options"][0]["model"], "k3.1-pro");
+        assert_eq!(
+            on["availableModels"],
+            json!(CLAUDE_FAMILIES),
+            "hidden outside the pinned folders"
+        );
+        assert!(prefs.picker_set);
+
+        // Idempotent: the user's own picker is still the one to restore.
+        let rows = on["modelPicker"]["options"].as_array().unwrap().clone();
+        sync_pin_picker_at(&path, &mut prefs, rows).unwrap();
+        assert_eq!(prefs.saved_picker, Some(mine.clone()));
+
+        sync_pin_picker_at(&path, &mut prefs, vec![]).unwrap();
+        let off = read();
+        assert_eq!(off["modelPicker"], mine, "the user's picker is back");
+        assert!(!prefs.picker_set);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
